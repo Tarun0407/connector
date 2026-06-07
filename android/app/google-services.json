@@ -1,0 +1,30 @@
+{
+  "project_info": {
+    "project_number": "32460862306",
+    "firebase_url": "https://connector-3ea8a-default-rtdb.firebaseio.com",
+    "project_id": "connector-3ea8a",
+    "storage_bucket": "connector-3ea8a.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:32460862306:android:8bc81a185af964f0b7723b",
+        "android_client_info": {
+          "package_name": "com.example.connector"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDOBJDzqE0Yp-f33CWZBPwA2Auc07hCT4c"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
