@@ -293,6 +293,22 @@ class ConnectorController extends ChangeNotifier {
       return;
     }
 
+    // Optimization: Check if there's already a queued command of the same type
+    // to avoid flooding the database if the user clicks repeatedly.
+    final existing = await _roomRef
+        .collection('commands')
+        .where('target', isEqualTo: target.key)
+        .where('type', isEqualTo: type)
+        .where('status', isEqualTo: 'queued')
+        .limit(1)
+        .get();
+
+    if (existing.docs.isNotEmpty) {
+      statusMessage = 'Command already queued';
+      _safeNotify();
+      return;
+    }
+
     await _roomRef.collection('commands').add({
       'type': type,
       'target': target.key,

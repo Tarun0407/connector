@@ -1,8 +1,10 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'connector_controller.dart';
 import 'models.dart';
+import 'theme_extensions.dart';
 
 class ConnectorApp extends StatelessWidget {
   const ConnectorApp({super.key, required this.controller});
@@ -29,6 +31,20 @@ class ConnectorApp extends StatelessWidget {
             side: const BorderSide(color: Color(0xFFE2E8F0)),
           ),
         ),
+        extensions: <ThemeExtension<dynamic>>[
+          const ConnectorColors(
+            scaffoldBackground: Color(0xFFF6F8FB),
+            cardBorder: Color(0xFFE2E8F0),
+            bodyText: Color(0xFF64748B),
+            firebaseWarningBackground: Color(0xFFFFFBEB),
+            firebaseWarningIcon: Color(0xFFB45309),
+            firebaseWarningText: Color(0xFF78350F),
+            disconnectedPanelBackground: Color(0xFFE0F2FE),
+            statusPillBorder: Color(0xFFD8E0EA),
+            onlineIcon: Color(0xFF0F766E),
+            emptyStateIcon: Color(0xFF94A3B8),
+          ),
+        ],
       ),
       home: ConnectorHome(controller: controller),
     );
@@ -37,7 +53,6 @@ class ConnectorApp extends StatelessWidget {
 
 class ConnectorHome extends StatefulWidget {
   const ConnectorHome({super.key, required this.controller});
-
   final ConnectorController controller;
 
   @override
@@ -49,7 +64,6 @@ class _ConnectorHomeState extends State<ConnectorHome> {
   bool _editingPairing = false;
 
   ConnectorController get controller => widget.controller;
-
   @override
   void initState() {
     super.initState();
@@ -152,6 +166,8 @@ class _TopBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final colors = Theme.of(context).extension<ConnectorColors>()!;
+
     return Row(
       children: [
         Container(
@@ -180,7 +196,7 @@ class _TopBar extends StatelessWidget {
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: theme.textTheme.bodyMedium?.copyWith(
-                  color: const Color(0xFF64748B),
+                  color: colors.bodyText,
                 ),
               ),
             ],
@@ -347,13 +363,20 @@ class _SettingsSheetState extends State<_SettingsSheet> {
                             children: [
                               const Text('Pairing code'),
                               const SizedBox(height: 6),
-                              Text(
-                                c.roomCode ?? '',
-                                style: Theme.of(context).textTheme.titleMedium
-                                    ?.copyWith(
-                                      fontWeight: FontWeight.w800,
-                                      letterSpacing: 1.2,
-                                    ),
+                              AnimatedBuilder(
+                                animation: c,
+                                builder: (context, child) {
+                                  return Text(
+                                    c.roomCode ?? '',
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .titleMedium
+                                        ?.copyWith(
+                                          fontWeight: FontWeight.w800,
+                                          letterSpacing: 1.2,
+                                        ),
+                                  );
+                                },
                               ),
                             ],
                           ),
@@ -372,62 +395,99 @@ class _SettingsSheetState extends State<_SettingsSheet> {
                           icon: const Icon(Icons.copy_rounded),
                         ),
                         const SizedBox(width: 8),
-                        IconButton.filledTonal(
-                          onPressed: c.isBooting
-                              ? null
-                              : () async {
-                                  await c.generateNewRoom();
-                                },
-                          icon: const Icon(Icons.refresh_rounded),
+                        AnimatedBuilder(
+                          animation: c,
+                          builder: (context, child) {
+                            return IconButton.filledTonal(
+                              onPressed: c.isBooting
+                                  ? null
+                                  : () async {
+                                      await c.generateNewRoom();
+                                    },
+                              icon: const Icon(Icons.refresh_rounded),
+                            );
+                          },
                         ),
                       ],
                     ),
                   ),
                 ),
                 const SizedBox(height: 12),
-                SwitchListTile(
-                  contentPadding: EdgeInsets.zero,
-                  value: c.autoStartEnabled,
-                  onChanged: (v) => c.setAutoStart(v),
-                  secondary: const Icon(Icons.rocket_launch_rounded),
-                  title: const Text('Autostart'),
-                  subtitle: Text(c.autoStartEnabled ? 'Enabled' : 'Disabled'),
+                AnimatedBuilder(
+                  animation: c,
+                  builder: (context, child) {
+                    return SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      value: c.autoStartEnabled,
+                      onChanged: (v) => c.setAutoStart(v),
+                      secondary: const Icon(Icons.rocket_launch_rounded),
+                      title: const Text('Autostart'),
+                      subtitle: Text(
+                        c.autoStartEnabled ? 'Enabled' : 'Disabled',
+                      ),
+                    );
+                  },
                 ),
                 const SizedBox(height: 8),
                 if (c.role == DeviceRole.phone) ...[
-                  FilledButton(
-                    onPressed: () async {
-                      await c.requestNotificationSendingPermission();
+                  AnimatedBuilder(
+                    animation: c,
+                    builder: (context, child) {
+                      return FilledButton(
+                        onPressed: () async {
+                          await c.requestNotificationSendingPermission();
+                        },
+                        child: const Text('Request notification permission'),
+                      );
                     },
-                    child: const Text('Request notification permission'),
                   ),
                   const SizedBox(height: 8),
-                  FilledButton(
-                    onPressed: () async {
-                      await c.openNotificationAccessSettings();
+                  AnimatedBuilder(
+                    animation: c,
+                    builder: (context, child) {
+                      return FilledButton(
+                        onPressed: () async {
+                          await c.openNotificationAccessSettings();
+                        },
+                        child: const Text('Open notification access settings'),
+                      );
                     },
-                    child: const Text('Open notification access settings'),
                   ),
                   const SizedBox(height: 8),
-                  FilledButton(
-                    onPressed: () async {
-                      await c.requestPhoneAdminLocally();
+                  AnimatedBuilder(
+                    animation: c,
+                    builder: (context, child) {
+                      return FilledButton(
+                        onPressed: () async {
+                          await c.requestPhoneAdminLocally();
+                        },
+                        child: const Text('Request device admin'),
+                      );
                     },
-                    child: const Text('Request device admin'),
                   ),
                   const SizedBox(height: 8),
-                  FilledButton(
-                    onPressed: () async {
-                      await c.refreshPhoneState();
+                  AnimatedBuilder(
+                    animation: c,
+                    builder: (context, child) {
+                      return FilledButton(
+                        onPressed: () async {
+                          await c.refreshPhoneState();
+                        },
+                        child: const Text('Refresh phone state'),
+                      );
                     },
-                    child: const Text('Refresh phone state'),
                   ),
                 ] else ...[
-                  FilledButton(
-                    onPressed: () async {
-                      await c.refreshDesktopSnapshot(publishChanges: true);
+                  AnimatedBuilder(
+                    animation: c,
+                    builder: (context, child) {
+                      return FilledButton(
+                        onPressed: () async {
+                          await c.refreshDesktopSnapshot(publishChanges: true);
+                        },
+                        child: const Text('Refresh desktop snapshot'),
+                      );
                     },
-                    child: const Text('Refresh desktop snapshot'),
                   ),
                 ],
                 const SizedBox(height: 12),
@@ -503,20 +563,25 @@ class _FirebaseWarning extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = Theme.of(context).extension<ConnectorColors>()!;
+
     return Card(
-      color: const Color(0xFFFFFBEB),
+      color: colors.firebaseWarningBackground,
       child: Padding(
         padding: const EdgeInsets.all(14),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Icon(Icons.warning_amber_rounded, color: Color(0xFFB45309)),
+            Icon(
+              Icons.warning_amber_rounded,
+              color: colors.firebaseWarningIcon,
+            ),
             const SizedBox(width: 10),
             Expanded(
               child: Text(
                 'Firebase is not configured yet. Replace lib/firebase_options.dart after creating the Firebase project. $error',
                 style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                  color: const Color(0xFF78350F),
+                  color: colors.firebaseWarningText,
                 ),
               ),
             ),
@@ -606,6 +671,7 @@ class _PhoneHome extends StatelessWidget {
   Widget build(BuildContext context) {
     final laptop = controller.primaryLaptop;
     final laptopOnline = laptop != null && controller.isDeviceOnline(laptop);
+
     final children = [
       if (laptopOnline)
         _LaptopControls(controller: controller, laptop: laptop)
@@ -706,6 +772,8 @@ class _DisconnectedPanel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = Theme.of(context).extension<ConnectorColors>()!;
+
     return _Panel(
       title: title,
       icon: Icons.link_off_rounded,
@@ -718,7 +786,7 @@ class _DisconnectedPanel extends StatelessWidget {
               width: 58,
               height: 58,
               decoration: BoxDecoration(
-                color: const Color(0xFFE0F2FE),
+                color: colors.disconnectedPanelBackground,
                 borderRadius: BorderRadius.circular(16),
               ),
               child: Icon(
@@ -741,7 +809,7 @@ class _DisconnectedPanel extends StatelessWidget {
               textAlign: TextAlign.center,
               style: Theme.of(
                 context,
-              ).textTheme.bodyMedium?.copyWith(color: const Color(0xFF64748B)),
+              ).textTheme.bodyMedium?.copyWith(color: colors.bodyText),
             ),
           ],
         ),
@@ -752,7 +820,6 @@ class _DisconnectedPanel extends StatelessWidget {
 
 class _LaptopControls extends StatefulWidget {
   const _LaptopControls({required this.controller, required this.laptop});
-
   final ConnectorController controller;
   final RemoteDevice? laptop;
 
@@ -762,13 +829,33 @@ class _LaptopControls extends StatefulWidget {
 
 class _LaptopControlsState extends State<_LaptopControls> {
   double? _pendingVolume;
+  Timer? _debounceTimer;
+  @override
+  void dispose() {
+    _debounceTimer?.cancel();
+    super.dispose();
+  }
+
+  void _onVolumeChanged(double value) {
+    setState(() => _pendingVolume = value);
+
+    _debounceTimer?.cancel();
+    _debounceTimer = Timer(const Duration(milliseconds: 300), () async {
+      if (mounted) {
+        await widget.controller.sendLaptopCommand(
+          'laptop.volume.set',
+          payload: {'level': value.round()},
+        );
+        setState(() => _pendingVolume = null);
+      }
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
     final laptop = widget.laptop;
     final remoteVolume = laptop?.volume ?? widget.controller.laptopVolume ?? 50;
     final volume = (_pendingVolume ?? remoteVolume).clamp(0, 100).toDouble();
-
     return _Panel(
       title: 'Laptop Controls',
       icon: Icons.laptop_windows_rounded,
@@ -848,16 +935,7 @@ class _LaptopControlsState extends State<_LaptopControls> {
                   max: 100,
                   divisions: 20,
                   label: '${volume.round()}%',
-                  onChanged: (value) => setState(() => _pendingVolume = value),
-                  onChangeEnd: (value) async {
-                    await widget.controller.sendLaptopCommand(
-                      'laptop.volume.set',
-                      payload: {'level': value.round()},
-                    );
-                    if (mounted) {
-                      setState(() => _pendingVolume = null);
-                    }
-                  },
+                  onChanged: _onVolumeChanged,
                 ),
               ),
               SizedBox(
@@ -927,6 +1005,8 @@ class _RemoteUnlockPanelState extends State<_RemoteUnlockPanel> {
   @override
   Widget build(BuildContext context) {
     final saved = widget.controller.windowsUnlockPasswordSaved;
+    final colors = Theme.of(context).extension<ConnectorColors>()!;
+
     return _Panel(
       title: 'Remote Unlock',
       icon: Icons.lock_open_rounded,
@@ -939,7 +1019,7 @@ class _RemoteUnlockPanelState extends State<_RemoteUnlockPanel> {
                 : 'Save the Windows password here before locking the laptop.',
             style: Theme.of(
               context,
-            ).textTheme.bodyMedium?.copyWith(color: const Color(0xFF64748B)),
+            ).textTheme.bodyMedium?.copyWith(color: colors.bodyText),
           ),
           const SizedBox(height: 12),
           TextField(
@@ -981,7 +1061,7 @@ class _RemoteUnlockPanelState extends State<_RemoteUnlockPanel> {
             'The phone will ask for fingerprint or device PIN before sending the unlock command.',
             style: Theme.of(
               context,
-            ).textTheme.bodySmall?.copyWith(color: const Color(0xFF64748B)),
+            ).textTheme.bodySmall?.copyWith(color: colors.bodyText),
           ),
         ],
       ),
@@ -1006,12 +1086,21 @@ class _ResponsiveGrid extends StatelessWidget {
       );
     }
 
-    return Wrap(
-      spacing: 14,
-      runSpacing: 14,
-      children: [
-        for (final child in children) SizedBox(width: 370, child: child),
-      ],
+    return GridView.builder(
+      shrinkWrap: true,
+      physics:
+          const NeverScrollableScrollPhysics(), // To prevent nested scrolling
+      gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+        maxCrossAxisExtent: 370.0, // Max width for each item
+        mainAxisSpacing: 14.0,
+        crossAxisSpacing: 14.0,
+        childAspectRatio:
+            0.8, // Adjust this value to control item height relative to width
+      ),
+      itemCount: children.length,
+      itemBuilder: (context, index) {
+        return children[index];
+      },
     );
   }
 }
@@ -1022,7 +1111,6 @@ class _Panel extends StatelessWidget {
   final String title;
   final IconData icon;
   final Widget child;
-
   @override
   Widget build(BuildContext context) {
     return Card(
@@ -1067,6 +1155,7 @@ class _CommandButton extends StatelessWidget {
 
   final IconData icon;
   final String label;
+
   final VoidCallback? onPressed;
 
   @override
@@ -1087,11 +1176,13 @@ class _StatusPill extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = Theme.of(context).extension<ConnectorColors>()!;
+
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: const Color(0xFFD8E0EA)),
+        border: Border.all(color: colors.statusPillBorder),
         color: Colors.white,
       ),
       child: Row(
@@ -1207,6 +1298,8 @@ class _DeviceListTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = Theme.of(context).extension<ConnectorColors>()!;
+
     return ListTile(
       dense: true,
       contentPadding: EdgeInsets.zero,
@@ -1219,7 +1312,7 @@ class _DeviceListTile extends StatelessWidget {
       subtitle: Text(device.platform),
       trailing: Icon(
         online ? Icons.cloud_done_rounded : Icons.cloud_off_rounded,
-        color: online ? const Color(0xFF0F766E) : Colors.grey,
+        color: online ? colors.onlineIcon : Colors.grey,
       ),
     );
   }
@@ -1300,20 +1393,22 @@ class _EmptyState extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = Theme.of(context).extension<ConnectorColors>()!;
+
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 18),
       child: Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(icon, size: 32, color: const Color(0xFF94A3B8)),
+            Icon(icon, size: 32, color: colors.emptyStateIcon),
             const SizedBox(height: 8),
             Text(
               label,
               textAlign: TextAlign.center,
               style: Theme.of(
                 context,
-              ).textTheme.bodyMedium?.copyWith(color: const Color(0xFF64748B)),
+              ).textTheme.bodyMedium?.copyWith(color: colors.bodyText),
             ),
           ],
         ),
