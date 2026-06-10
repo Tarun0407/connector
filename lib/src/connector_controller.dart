@@ -397,12 +397,9 @@ class ConnectorController extends ChangeNotifier {
         await platform.lockComputer();
         return;
       case 'laptop.unlock':
-        final unlocked = await platform.unlockComputer();
-        if (!unlocked) {
-          throw StateError(
-            'Remote unlock failed. Save the laptop password on Windows first, '
-            'and keep Connector running before the laptop is locked.',
-          );
+        final errorCode = await platform.unlockComputer();
+        if (errorCode != 0) {
+          throw StateError(_getUnlockErrorMessage(errorCode));
         }
         return;
       case 'laptop.refresh':
@@ -800,6 +797,16 @@ class ConnectorController extends ChangeNotifier {
       'phone.requestAdmin' => 'enable phone lock',
       _ => type,
     };
+  }
+
+  String _getUnlockErrorMessage(int? code) {
+    if (code == null) return 'Unknown error: Remote unlock failed';
+    if (code == -1) return 'Password not found: Remote unlock failed';
+    if (code == -2) return 'No active session: Remote unlock failed';
+    if (code == 5) return 'Access Denied (Error 5): Run as Administrator';
+    if (code == 1326)
+      return 'Invalid password (Error 1326): Remote unlock failed';
+    return 'Windows Error $code: Remote unlock failed';
   }
 
   void _safeNotify() {

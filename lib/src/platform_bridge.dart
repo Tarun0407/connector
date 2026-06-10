@@ -62,7 +62,10 @@ class ConnectorPlatformBridge {
 
   Future<bool> lockComputer() => _invokeBool('lockComputer');
 
-  Future<bool> unlockComputer() => _invokeBool('unlockComputer');
+  Future<int?> unlockComputer() async {
+    final value = await _invoke<Object?>('unlockComputer');
+    return value is int ? value : null;
+  }
 
   Future<bool> saveWindowsUnlockPassword(String password) {
     return _invokeBool('saveWindowsUnlockPassword', {'password': password});

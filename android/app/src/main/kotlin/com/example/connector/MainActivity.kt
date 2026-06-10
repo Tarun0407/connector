@@ -25,6 +25,7 @@ import android.os.CancellationSignal
 import android.os.SystemClock
 import android.os.PowerManager
 import android.provider.Settings
+import androidx.core.content.ContextCompat
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -141,6 +142,7 @@ class MainActivity : FlutterActivity() {
     private fun authenticateForRemoteUnlock(result: MethodChannel.Result) {
         val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
         if (!keyguardManager.isDeviceSecure) {
+            android.util.Log.d("Connector", "Unlock failed: Device is not secure (no PIN/Fingerprint)")
             result.success(false)
             return
         }
@@ -167,7 +169,8 @@ class MainActivity : FlutterActivity() {
         val cancellationSignal = CancellationSignal()
         val builder = BiometricPrompt.Builder(this)
             .setTitle("Unlock laptop")
-            .setSubtitle("Confirm this is you before Connector sends the unlock command.")
+            .setSubtitle("Confirm this is you before Connector sends the unlock command")
+            
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             builder.setAllowedAuthenticators(BIOMETRIC_STRONG or DEVICE_CREDENTIAL)
@@ -176,27 +179,32 @@ class MainActivity : FlutterActivity() {
             builder.setDeviceCredentialAllowed(true)
         }
 
+        try {
         builder.build().authenticate(
             cancellationSignal,
-            mainExecutor,
+            ContextCompat.getMainExecutor(this),
             object : BiometricPrompt.AuthenticationCallback() {
-                override fun onAuthenticationSucceeded(
-                    authResult: BiometricPrompt.AuthenticationResult
-                ) {
+                    override fun onAuthenticationSucceeded(authResult: BiometricPrompt.AuthenticationResult) {
                     pendingRemoteUnlockAuthResult?.success(true)
-                    pendingRemoteUnlockAuthResult = null
+                        pendingRemoteUnlockAuthResult = null
                 }
 
                 override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+                        android.util.Log.e("Connector", "Biometric Error: $errorCode - $errString")
                     pendingRemoteUnlockAuthResult?.success(false)
                     pendingRemoteUnlockAuthResult = null
                 }
 
                 override fun onAuthenticationFailed() {
-                    // Keep the prompt open. Android will call onAuthenticationError on cancel/lockout.
+                        // Keep the prompt open
                 }
             }
         )
+        } catch (e: Exception) {
+            android.util.Log.e("Connector", "Biometric Prompt Exception: ${e.message}")
+            result.success(false)
+            pendingRemoteUnlockAuthResult = null
+    }
     }
 
     private fun showLaptopMediaNotification(media: Map<*, *>): Boolean {
@@ -541,3 +549,4 @@ class MainActivity : FlutterActivity() {
         }
     }
 }
+
