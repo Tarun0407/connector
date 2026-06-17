@@ -10,6 +10,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../firebase_options.dart';
 import 'models.dart';
 import 'platform_bridge.dart';
+import 'local_network_client.dart';
 
 class ConnectorController extends ChangeNotifier {
   ConnectorController({ConnectorPlatformBridge? platformBridge, Random? random})
@@ -23,6 +24,7 @@ class ConnectorController extends ChangeNotifier {
   final ConnectorPlatformBridge platform;
   final Random? _random;
   final DeviceRole role;
+  final LocalNetworkClient _localClient = LocalNetworkClient();
 
   bool isBooting = true;
   bool firebaseReady = false;
@@ -31,6 +33,9 @@ class ConnectorController extends ChangeNotifier {
   String deviceId = '';
   String deviceLabel = '';
   String statusMessage = 'Starting';
+  String? laptopLocalIp;
+  ConnectivityMode currentMode =
+      ConnectivityMode.wifi; // New: Control the priority mode
   List<RemoteDevice> devices = const [];
   List<ActivityEvent> events = const [];
   List<WindowEntry> windows = const [];
@@ -41,7 +46,6 @@ class ConnectorController extends ChangeNotifier {
   bool autoStartEnabled = false;
   bool canPostNotifications = false;
   bool notificationAccessEnabled = false;
-  bool windowsUnlockPasswordSaved = false;
 
   SharedPreferences? _preferences;
   StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _devicesSub;
@@ -58,16 +62,11 @@ class ConnectorController extends ChangeNotifier {
   bool _disposed = false;
 
   RemoteDevice? get primaryLaptop => _firstDevice(DeviceRole.laptop);
-
   RemoteDevice? get primaryPhone => _firstDevice(DeviceRole.phone);
-
   bool get hasRoom => roomCode != null && roomCode!.isNotEmpty;
 
   bool isDeviceOnline(RemoteDevice device) {
-    if (!device.online || device.lastSeen == null) {
-      return false;
-    }
-
+    if (!device.online || device.lastSeen == null) return false;
     return DateTime.now().difference(device.lastSeen!) <
         const Duration(minutes: 3);
   }
@@ -109,9 +108,8 @@ class ConnectorController extends ChangeNotifier {
 
     if (role == DeviceRole.phone) {
       await refreshPhoneState();
-    } else {
-      await refreshWindowsUnlockState();
     }
+
     await refreshAutoStart();
     _listenForLocalPhoneNotifications();
     _listenForLaptopMediaNotificationActions();
@@ -127,9 +125,7 @@ class ConnectorController extends ChangeNotifier {
 
     if (!firebaseReady) {
       statusMessage = 'Firebase setup required';
-      if (notifyWhenDone) {
-        _safeNotify();
-      }
+      if (notifyWhenDone) _safeNotify();
       return;
     }
 
@@ -153,9 +149,7 @@ class ConnectorController extends ChangeNotifier {
     }
 
     statusMessage = 'Connected to $nextCode';
-    if (notifyWhenDone) {
-      _safeNotify();
-    }
+    if (notifyWhenDone) _safeNotify();
   }
 
   Future<void> generateNewRoom() async {
@@ -163,9 +157,7 @@ class ConnectorController extends ChangeNotifier {
   }
 
   Future<void> refreshPhoneState() async {
-    if (role != DeviceRole.phone) {
-      return;
-    }
+    if (role != DeviceRole.phone) return;
     phoneAdminEnabled = await platform.isDeviceAdmin();
     canPostNotifications = await platform.canPostNotifications();
     notificationAccessEnabled = await platform.isNotificationAccessEnabled();
@@ -222,64 +214,53 @@ class ConnectorController extends ChangeNotifier {
     await refreshPhoneState();
   }
 
-  Future<void> refreshWindowsUnlockState() async {
-    if (role != DeviceRole.laptop) {
-      return;
-    }
-    windowsUnlockPasswordSaved = await platform.hasWindowsUnlockPassword();
-    await _updatePresence(
-      extra: {'remoteUnlockReady': windowsUnlockPasswordSaved},
-    );
-    _safeNotify();
-  }
-
-  Future<bool> saveWindowsUnlockPassword(String password) async {
-    if (role != DeviceRole.laptop) {
-      return false;
-    }
-    final trimmed = password.trim();
-    if (trimmed.isEmpty) {
-      return false;
-    }
-    final saved = await platform.saveWindowsUnlockPassword(trimmed);
-    windowsUnlockPasswordSaved = saved;
-    await _updatePresence(extra: {'remoteUnlockReady': saved});
-    _safeNotify();
-    return saved;
-  }
-
-  Future<void> clearWindowsUnlockPassword() async {
-    if (role != DeviceRole.laptop) {
-      return;
-    }
-    await platform.clearWindowsUnlockPassword();
-    windowsUnlockPasswordSaved = false;
-    await _updatePresence(extra: {'remoteUnlockReady': false});
-    _safeNotify();
-  }
-
-  Future<void> unlockLaptopFromPhone() async {
-    if (role != DeviceRole.phone) {
-      return;
-    }
-    final authenticated = await platform.authenticateForRemoteUnlock();
-    if (!authenticated) {
-      statusMessage = 'Unlock cancelled';
-      _safeNotify();
-      return;
-    }
-    await sendLaptopCommand('laptop.unlock');
-  }
-
   Future<void> sendPhoneCommand(String type) {
     return sendCommand(DeviceRole.phone, type);
+  }
+
+  Future<void> setConnectivityMode(ConnectivityMode mode) async {
+    currentMode = mode;
+    await _updatePresence(extra: {'connectivityMode': mode.key});
+    _safeNotify();
   }
 
   Future<void> sendLaptopCommand(
     String type, {
     Map<String, Object?> payload = const {},
-  }) {
+  }) async {
+    // Only try local network if mode is set to WIFI and we have a local IP
+    if (currentMode == ConnectivityMode.wifi &&
+        role == DeviceRole.phone &&
+        laptopLocalIp != null) {
+      final localCommand = _mapCommandToLocal(type);
+      if (localCommand != null) {
+        final success = await _localClient.sendCommand(
+          laptopLocalIp!,
+          localCommand,
+        );
+        if (success) {
+          statusMessage = 'Sent via Local WiFi: ${_readableCommand(type)}';
+          _safeNotify();
+          return;
+        }
+      }
+    }
+
+    // Fallback or direct Cloud usage if mode is NET
     return sendCommand(DeviceRole.laptop, type, payload: payload);
+  }
+
+  String? _mapCommandToLocal(String type) {
+    return switch (type) {
+      'laptop.media.toggle' => 'mediaPlayPause',
+      'laptop.media.next' => 'mediaNext',
+      'laptop.media.previous' => 'mediaPrevious',
+      'laptop.volume.up' => 'volumeUp',
+      'laptop.volume.down' => 'volumeDown',
+      'laptop.volume.mute' => 'volumeMute',
+      'laptop.lock' => 'lock',
+      _ => null,
+    };
   }
 
   Future<void> sendCommand(
@@ -293,8 +274,6 @@ class ConnectorController extends ChangeNotifier {
       return;
     }
 
-    // Optimization: Check if there's already a queued command of the same type
-    // to avoid flooding the database if the user clicks repeatedly.
     final existing = await _roomRef
         .collection('commands')
         .where('target', isEqualTo: target.key)
@@ -324,14 +303,13 @@ class ConnectorController extends ChangeNotifier {
   }
 
   Future<void> refreshDesktopSnapshot({bool publishChanges = false}) async {
-    if (role != DeviceRole.laptop) {
-      return;
-    }
+    if (role != DeviceRole.laptop) return;
 
     final fetchedWindows = await platform.listWindows();
     final fetchedVolume = await platform.getVolume();
     final fetchedMuted = await platform.isMuted();
     final fetchedMedia = await platform.getMediaStatus();
+    final localIp = await platform.getLocalIp();
 
     if (publishChanges) {
       await _publishWindowDiff(fetchedWindows);
@@ -357,6 +335,8 @@ class ConnectorController extends ChangeNotifier {
         'volume': fetchedVolume ?? FieldValue.delete(),
         'muted': fetchedMuted ?? FieldValue.delete(),
         'media': fetchedMedia?.toMap() ?? FieldValue.delete(),
+        'localIp': localIp ?? FieldValue.delete(),
+        'connectivityMode': currentMode.key,
       },
     );
     _safeNotify();
@@ -396,12 +376,6 @@ class ConnectorController extends ChangeNotifier {
       case 'laptop.lock':
         await platform.lockComputer();
         return;
-      case 'laptop.unlock':
-        final errorCode = await platform.unlockComputer();
-        if (errorCode != 0) {
-          throw StateError(_getUnlockErrorMessage(errorCode));
-        }
-        return;
       case 'laptop.refresh':
         await refreshDesktopSnapshot(publishChanges: false);
         return;
@@ -431,8 +405,18 @@ class ConnectorController extends ChangeNotifier {
               .map((doc) => RemoteDevice.fromDoc(doc.id, doc.data()))
               .toList()
             ..sort((a, b) => a.role.index.compareTo(b.role.index));
+
       if (role == DeviceRole.phone) {
         final laptop = primaryLaptop;
+        // Update local IP if the laptop provides one via the cloud server
+        laptopLocalIp = laptop?.localIp;
+
+        // Sync the connectivity mode from the laptop
+        if (laptop != null && laptop.connectivityMode != currentMode) {
+          currentMode = laptop.connectivityMode;
+          _safeNotify();
+        }
+
         final media = laptop?.media;
         if (laptop == null || media == null || !isDeviceOnline(laptop)) {
           unawaited(platform.cancelLaptopMediaNotification());
@@ -478,20 +462,14 @@ class ConnectorController extends ChangeNotifier {
 
   String _notificationBody(ActivityEvent event) {
     final time = event.originalTime;
-    if (time == null) {
-      return event.detail;
-    }
-
+    if (time == null) return event.detail;
     final hour = time.hour.toString().padLeft(2, '0');
     final minute = time.minute.toString().padLeft(2, '0');
     return '$hour:$minute  ${event.detail}';
   }
 
   void _listenForLocalPhoneNotifications() {
-    if (role != DeviceRole.phone) {
-      return;
-    }
-
+    if (role != DeviceRole.phone) return;
     _phoneNotificationsSub?.cancel();
     _phoneNotificationsSub = platform.phoneNotifications.listen((data) {
       final packageName = (data['package'] ?? 'Android').toString();
@@ -513,10 +491,7 @@ class ConnectorController extends ChangeNotifier {
   }
 
   void _listenForLaptopMediaNotificationActions() {
-    if (role != DeviceRole.phone) {
-      return;
-    }
-
+    if (role != DeviceRole.phone) return;
     _laptopMediaActionsSub?.cancel();
     _laptopMediaActionsSub = platform.laptopMediaActions.listen((data) {
       final action = (data['action'] ?? 'toggle').toString();
@@ -555,9 +530,7 @@ class ConnectorController extends ChangeNotifier {
     DocumentSnapshot<Map<String, dynamic>> doc,
   ) async {
     final data = doc.data();
-    if (data == null) {
-      return;
-    }
+    if (data == null) return;
     final type = (data['type'] ?? '').toString();
     final payload =
         (data['payload'] as Map?)?.cast<String, Object?>() ??
@@ -648,9 +621,7 @@ class ConnectorController extends ChangeNotifier {
     required String detail,
     DateTime? originalTime,
   }) async {
-    if (!firebaseReady || !hasRoom) {
-      return;
-    }
+    if (!firebaseReady || !hasRoom) return;
 
     await _roomRef.collection('events').add({
       'type': type,
@@ -665,9 +636,7 @@ class ConnectorController extends ChangeNotifier {
   }
 
   Future<void> _updatePresence({Map<String, Object?> extra = const {}}) async {
-    if (!firebaseReady || !hasRoom) {
-      return;
-    }
+    if (!firebaseReady || !hasRoom) return;
 
     await _roomRef.collection('devices').doc(deviceId).set({
       'role': role.key,
@@ -702,9 +671,7 @@ class ConnectorController extends ChangeNotifier {
   void _pollDesktopSnapshot({required bool publishChanges}) {
     unawaited(
       refreshDesktopSnapshot(publishChanges: publishChanges).whenComplete(() {
-        if (_disposed || role != DeviceRole.laptop) {
-          return;
-        }
+        if (_disposed || role != DeviceRole.laptop) return;
 
         final delay = laptopMedia == null
             ? _idleDesktopPollInterval
@@ -740,14 +707,10 @@ class ConnectorController extends ChangeNotifier {
 
   RemoteDevice? _firstDevice(DeviceRole targetRole) {
     for (final device in devices) {
-      if (device.role == targetRole && device.id != deviceId) {
-        return device;
-      }
+      if (device.role == targetRole && device.id != deviceId) return device;
     }
     for (final device in devices) {
-      if (device.role == targetRole) {
-        return device;
-      }
+      if (device.role == targetRole) return device;
     }
     return null;
   }
@@ -758,7 +721,6 @@ class ConnectorController extends ChangeNotifier {
         'media': true,
         'volume': true,
         'lock': true,
-        'remoteUnlock': windowsUnlockPasswordSaved,
         'windowLogs': true,
         'autoStart': true,
         'mediaMetadata': true,
@@ -789,7 +751,6 @@ class ConnectorController extends ChangeNotifier {
       'laptop.volume.mute' => 'mute toggle',
       'laptop.volume.set' => 'set volume',
       'laptop.lock' => 'lock laptop',
-      'laptop.unlock' => 'unlock laptop',
       'laptop.refresh' => 'refresh laptop',
       'phone.ring' => 'locate phone',
       'phone.stopRing' => 'stop ringing',
@@ -799,20 +760,8 @@ class ConnectorController extends ChangeNotifier {
     };
   }
 
-  String _getUnlockErrorMessage(int? code) {
-    if (code == null) return 'Unknown error: Remote unlock failed';
-    if (code == -1) return 'Password not found: Remote unlock failed';
-    if (code == -2) return 'No active session: Remote unlock failed';
-    if (code == 5) return 'Access Denied (Error 5): Run as Administrator';
-    if (code == 1326)
-      return 'Invalid password (Error 1326): Remote unlock failed';
-    return 'Windows Error $code: Remote unlock failed';
-  }
-
   void _safeNotify() {
-    if (!_disposed) {
-      notifyListeners();
-    }
+    if (!_disposed) notifyListeners();
   }
 
   @override

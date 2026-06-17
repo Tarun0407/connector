@@ -1,7 +1,6 @@
 #include "connector_platform_channel.h"
 
 #include <endpointvolume.h>
-#include <dpapi.h>
 #include <flutter/encodable_value.h>
 #include <flutter/method_channel.h>
 #include <flutter/standard_method_codec.h>
@@ -9,6 +8,8 @@
 #include <shellapi.h>
 #include <windows.h>
 #include <wtsapi32.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Media.Control.h>
 #include <winrt/base.h>
@@ -23,6 +24,9 @@
 #include <string>
 #include <variant>
 #include <vector>
+#include <thread>
+
+#pragma comment(lib, "ws2_32.lib")
 
 namespace {
 
@@ -39,8 +43,58 @@ constexpr char kChannelName[] = "connector/platform";
 constexpr wchar_t kRunKeyPath[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 constexpr wchar_t kAutoStartValueName[] = L"Connector";
 constexpr wchar_t kConnectorRegistryPath[] = L"Software\\Connector";
-constexpr wchar_t kRemoteUnlockSecretValueName[] = L"RemoteUnlockSecret";
 constexpr wchar_t kNotificationWindowClass[] = L"ConnectorNotificationWindow";
+constexpr int kLocalPort = 5005;
+
+// --- Local Network Server Logic ---
+
+void HandleLocalClient(SOCKET clientSocket) {
+    char buffer[1024] = {0};
+    int bytesRead = recv(clientSocket, buffer, 1024, 0);
+    if (bytesRead > 0) {
+        std::string command(buffer, bytesRead);
+        // Basic command mapping
+        if (command == "volumeUp") SendVirtualKey(VK_VOLUME_UP);
+        else if (command == "volumeDown") SendVirtualKey(VK_VOLUME_DOWN);
+        else if (command == "volumeMute") SendVirtualKey(VK_VOLUME_MUTE);
+        else if (command == "mediaPlayPause") SendVirtualKey(VK_MEDIA_PLAY_PAUSE);
+        else if (command == "mediaNext") SendVirtualKey(VK_MEDIA_NEXT_TRACK);
+        else if (command == "mediaPrevious") SendVirtualKey(VK_MEDIA_PREV_TRACK);
+        else if (command == "lock") LockWorkStation();
+    }
+    closesocket(clientSocket);
+}
+
+void StartLocalServer() {
+    std::thread([]() {
+        WSADATA wsaData;
+        if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) return;
+
+        SOCKET listenSocket = socket(AF_INET, SOCK_STREAM, 0);
+        if (listenSocket == INVALID_SOCKET) return;
+
+        sockaddr_in serverAddr = {};
+        serverAddr.sin_family = AF_INET;
+        serverAddr.sin_addr.s_addr = INADDR_ANY;
+        serverAddr.sin_port = htons(kLocalPort);
+
+        if (bind(listenSocket, (struct sockaddr*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR) {
+            closesocket(listenSocket);
+            return;
+        }
+
+        listen(listenSocket, SOMAXCONN);
+
+        while (true) {
+            SOCKET clientSocket = accept(listenSocket, nullptr, nullptr);
+            if (clientSocket != INVALID_SOCKET) {
+                std::thread(HandleLocalClient, clientSocket).detach();
+            }
+        }
+        closesocket(listenSocket);
+        WSACleanup();
+    }).detach();
+}
 
 LRESULT CALLBACK NotificationWindowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
   return DefWindowProc(hwnd, message, wparam, lparam);
@@ -102,49 +156,6 @@ void SendVirtualKey(WORD virtual_key) {
   inputs[1].ki.wVk = virtual_key;
   inputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
   SendInput(2, inputs, sizeof(INPUT));
-}
-
-void SendHardwareKey(wchar_t ch) {
-  WORD vk = 0;
-  bool shift = false;
-  if (ch >= L'0' && ch <= L'9') vk = 0x30 + (ch - L'0');
-  else if (ch >= L'a' && ch <= L'z') { vk = 0x41 + (ch - L'a'); shift = false; }
-  else if (ch >= L'A' && ch <= L'Z') { vk = 0x41 + (ch - L'A'); shift = true; }
-  else if (ch == L' ') vk = VK_SPACE;
-  else if (ch == L'!') { vk = 0x21; shift = true; }
-  else if (ch == L'@') { vk = 0x40; shift = true; }
-  else if (ch == L'#') { vk = 0x23; shift = true; }
-  else if (ch == L'$') { vk = 0x24; shift = true; }
-  else if (ch == L'%') { vk = 0x25; shift = true; }
-  else if (ch == L'^') { vk = 0x26; shift = true; }
-  else if (ch == L'&') { vk = 0x27; shift = true; }
-  else if (ch == L'*') { vk = 0x2A; shift = true; }
-  else if (ch == L'(') { vk = 0x28; shift = true; }
-  else if (ch == L')') { vk = 0x29; shift = true; }
-  else if (ch == L'_') { vk = VK_OEM_PLUS; shift = false; }
-  else if (ch == L'-') { vk = VK_OEM_MINUS; shift = false; }
-  else if (ch == L'=') { vk = VK_OEM_PLUS; shift = false; }
-  else if (ch == L'+') { vk = VK_OEM_PLUS; shift = true; }
-  else if (ch == L'[') { vk = VK_OEM_1; shift = false; }
-  else if (ch == L'{') { vk = VK_OEM_1; shift = true; }
-  else if (ch == L']') { vk = VK_OEM_6; shift = false; }
-  else if (ch == L'}') { vk = VK_OEM_6; shift = true; }
-  else if (ch == L'\\') { vk = VK_OEM_5; shift = false; }
-  else if (ch == L'|') { vk = VK_OEM_5; shift = true; }
-  else if (ch == L';') { vk = VK_OEM_1; shift = false; }
-  else if (ch == L':') { vk = VK_OEM_1; shift = true; }
-  else if (ch == L'\"') { vk = VK_OEM_2; shift = true; }
-  else if (ch == L'\'') { vk = VK_OEM_7; shift = false; }
-  else if (ch == L',') { vk = VK_OEM_COMMA; shift = false; }
-  else if (ch == L'<') { vk = VK_OEM_COMMA; shift = true; }
-  else if (ch == L'.') { vk = VK_OEM_PERIOD; shift = false; }
-  else if (ch == L'>') { vk = VK_OEM_PERIOD; shift = true; }
-  else if (ch == L'/') { vk = VK_OEM_2; shift = false; }
-  else if (ch == L'?') { vk = VK_OEM_2; shift = true; }
-  if (vk == 0) return;
-  if (shift) SendVirtualKey(VK_SHIFT);
-  SendVirtualKey(vk);
-  if (shift) SendVirtualKey(VK_SHIFT);
 }
 
 IAudioEndpointVolume* CreateEndpointVolume() {
@@ -213,6 +224,28 @@ std::wstring CurrentExecutablePath() {
   return path;
 }
 
+std::string GetLocalIPAddress() {
+  char hostname[256];
+  if (gethostname(hostname, sizeof(hostname)) != 0) return "";
+
+  struct addrinfo hints = {};
+  hints.ai_family = AF_INET;
+  hints.ai_socktype = SOCK_STREAM;
+
+  struct addrinfo* res = nullptr;
+  if (getaddrinfo(hostname, nullptr, &hints, &res) != 0) return "";
+
+  struct sockaddr_in* addr = reinterpret_cast<struct sockaddr_in*>(res->ai_addr);
+  std::string ip = WideToUtf8(InetNtopA(AF_INET, &addr->sin_addr, nullptr, 0)); // This is simplified
+
+  // More robust way to get the IP
+  char ipStr[INET_ADDRSTRLEN];
+  inet_ntop(AF_INET, &addr->sin_addr, ipStr, INET_ADDRSTRLEN);
+
+  freeaddrinfo(res);
+  return std::string(ipStr);
+}
+
 bool SetAutoStartEnabled(bool enabled) {
   HKEY run_key = nullptr;
   LONG result = RegCreateKeyExW(HKEY_CURRENT_USER, kRunKeyPath, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &run_key, nullptr);
@@ -237,29 +270,74 @@ bool IsAutoStartEnabled() {
   return result == ERROR_SUCCESS;
 }
 
-bool SaveProtectedUnlockPassword(const std::string& password_utf8) {
-  std::wstring password = Utf8ToWide(password_utf8);
-  if (password.empty()) return false;
-  DATA_BLOB plain = {};
-  plain.cbData = static_cast<DWORD>((password.size() + 1) * sizeof(wchar_t));
-  plain.pbData = reinterpret_cast<BYTE*>(password.data());
-  DATA_BLOB protected_data = {};
-  const BOOL protected_ok = CryptProtectData(&plain, L"Connector remote unlock password", nullptr, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &protected_data);
-  SecureZeroMemory(password.data(), password.size() * sizeof(wchar_t));
-  if (protected_ok != TRUE) return false;
-  HKEY connector_key = nullptr;
-  LONG result = RegCreateKeyExW(HKEY_CURRENT_USER, kConnectorRegistryPath, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &connector_key, nullptr);
-  if (result == ERROR_SUCCESS && connector_key != nullptr) {
-    result = RegSetValueExW(connector_key, kRemoteUnlockSecretValueName, 0, REG_BINARY, protected_data.pbData, protected_data.cbData);
-  }
-  if (connector_key != nullptr) RegCloseKey(connector_key);
-  SecureZeroMemory(protected_data.pbData, protected_data.cbData);
-  LocalFree(protected_data.pbData);
-  return result == ERROR_SUCCESS;
+bool ShowSystemNotification(const std::string& title, const std::string& body) {
+  NOTIFYICONDATAW data = {};
+  data.cbSize = sizeof(NOTIFYICONDATAW);
+  data.hWnd = NotificationHostWindow();
+  if (data.hWnd == nullptr) return false;
+  data.uID = 1208;
+  data.uFlags = NIF_INFO | NIF_ICON | NIF_TIP;
+  data.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
+  const std::wstring wide_title = Utf8ToWide(title);
+  const std::wstring wide_body = Utf8ToWide(body);
+  const std::wstring tip = L"Connector";
+  wcsncpy_s(data.szTip, tip.c_str(), _TRUNCATE);
+  wcsncpy_s(data.szInfoTitle, wide_title.c_str(), _TRUNCATE);
+  wcsncpy_s(data.szInfo, wide_body.c_str(), _TRUNCATE);
+  data.dwInfoFlags = NIIF_INFO;
+  Shell_NotifyIconW(NIM_ADD, &data);
+  const BOOL shown = Shell_NotifyIconW(NIM_MODIFY, &data);
+  return shown == TRUE;
 }
 
-bool HasProtectedUnlockPassword() {
-  HKEY connector_key = nullptr;
-  LONG result = RegOpenKeyExW(HKEY_CURRENT_USER, kConnectorRegistryPath, 0, KEY_QUERY_VALUE, &connector_key);
-  if (result != ERROR_SUCCESS || connector_key == nullptr) return false;
-  result = RegQueryValueExW(connector_key, kRemoteUnlockSecretValueName,
+int64_t TimeSpanToMs(winrt::Windows::Foundation::TimeSpan value) {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(value).count();
+}
+
+int64_t ClampTimelineMs(int64_t value, int64_t max_value) {
+  return std::clamp<int64_t>(value, 0, std::max<int64_t>(0, max_value));
+}
+
+int64_t TimelineAgeMs(winrt::Windows::Foundation::DateTime last_updated_time) {
+  const auto now = winrt::clock::now();
+  if (last_updated_time > now) return 0;
+  return std::chrono::duration_cast<std::chrono::milliseconds>(now - last_updated_time).count();
+}
+
+EncodableMap ReadMediaStatusOnWorker() {
+  EncodableMap status;
+  try {
+    winrt::init_apartment(winrt::apartment_type::multi_threaded);
+    auto manager = media_control::GlobalSystemMediaTransportControlsSessionManager::RequestAsync().get();
+    auto session = manager.GetCurrentSession();
+    if (!session) return status;
+    auto media_properties = session.TryGetMediaPropertiesAsync().get();
+    auto timeline = session.GetTimelineProperties();
+    auto playback_info = session.GetPlaybackInfo();
+    const int64_t start_ms = TimeSpanToMs(timeline.StartTime());
+    const int64_t end_ms = TimeSpanToMs(timeline.EndTime());
+    const int64_t duration_ms = std::max<int64_t>(0, end_ms - start_ms);
+    const bool is_playing = playback_info.PlaybackStatus() == media_control::GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing;
+    const int64_t timeline_age_ms = is_playing ? TimelineAgeMs(timeline.LastUpdatedTime()) : 0;
+    const int64_t position_ms = ClampTimelineMs(TimeSpanToMs(timeline.Position()) - start_ms + timeline_age_ms, duration_ms);
+    status[EncodableValue("title")] = EncodableValue(HStringToUtf8(media_properties.Title()));
+    status[EncodableValue("artist")] = EncodableValue(HStringToUtf8(media_properties.Artist()));
+    status[EncodableValue("album")] = EncodableValue(HStringToUtf8(media_properties.AlbumTitle()));
+    status[EncodableValue("sourceApp")] = EncodableValue(HStringToUtf8(session.SourceAppUserModelId()));
+    status[EncodableValue("isPlaying")] = EncodableValue(is_playing);
+    status[EncodableValue("positionMs")] = EncodableValue(position_ms);
+    status[EncodableValue("durationMs")] = EncodableValue(duration_ms);
+  } catch (const winrt::hresult_error&) {
+    return EncodableMap();
+  }
+  return status;
+}
+
+EncodableMap ReadMediaStatus() {
+  return std::async(std::launch::async, []() {
+    return ReadMediaStatusOnWorker();
+  }).get();
+}
+
+bool SeekCurrentMediaOnWorker(
+

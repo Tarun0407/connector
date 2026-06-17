@@ -203,6 +203,13 @@ class _TopBar extends StatelessWidget {
           ),
         ),
         _StatusPill(
+          icon: controller.currentMode == ConnectivityMode.wifi
+              ? Icons.wifi_rounded
+              : Icons.language_rounded,
+          label: controller.currentMode.label,
+        ),
+        const SizedBox(width: 8),
+        _StatusPill(
           icon: controller.role == DeviceRole.laptop
               ? Icons.computer_rounded
               : Icons.phone_android_rounded,
@@ -220,12 +227,10 @@ class _PairingPanel extends StatelessWidget {
     required this.onSettings,
     required this.onDone,
   });
-
   final ConnectorController controller;
   final TextEditingController textController;
   final VoidCallback onSettings;
   final VoidCallback onDone;
-
   @override
   Widget build(BuildContext context) {
     return Card(
@@ -296,7 +301,6 @@ class _SettingsSheet extends StatefulWidget {
   const _SettingsSheet({required this.controller});
 
   final ConnectorController controller;
-
   @override
   State<_SettingsSheet> createState() => _SettingsSheetState();
 }
@@ -413,6 +417,28 @@ class _SettingsSheetState extends State<_SettingsSheet> {
                   ),
                 ),
                 const SizedBox(height: 12),
+                AnimatedBuilder(
+                  animation: c,
+                  builder: (context, child) {
+                    return SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      value: c.currentMode == ConnectivityMode.wifi,
+                      onChanged: (v) {
+                        c.setConnectivityMode(
+                          v ? ConnectivityMode.wifi : ConnectivityMode.net,
+                        );
+                      },
+                      secondary: const Icon(Icons.settings_ethernet_rounded),
+                      title: const Text('Priority: Local WiFi'),
+                      subtitle: Text(
+                        c.currentMode == ConnectivityMode.wifi
+                            ? 'Tries Local WiFi first, then Cloud'
+                            : 'Uses Cloud Server directly',
+                      ),
+                    );
+                  },
+                ),
+                const SizedBox(height: 8),
                 AnimatedBuilder(
                   animation: c,
                   builder: (context, child) {
@@ -654,7 +680,6 @@ class _LaptopHome extends StatelessWidget {
         icon: Icons.power_settings_new_rounded,
         child: _AutoStartSwitch(controller: controller),
       ),
-      _RemoteUnlockPanel(controller: controller),
     ];
 
     return _ResponsiveGrid(wide: wide, children: children);
@@ -718,7 +743,7 @@ class _PhoneHome extends StatelessWidget {
                 _CommandButton(
                   icon: Icons.notifications_off_rounded,
                   label: 'Stop ring',
-                  onPressed: controller.platform.stopRingPhone,
+                  onPressed: () => controller.platform.stopRingPhone(),
                 ),
                 _StatusPill(
                   icon: controller.canPostNotifications
@@ -910,13 +935,6 @@ class _LaptopControlsState extends State<_LaptopControls> {
                     widget.controller.sendLaptopCommand('laptop.lock'),
               ),
               _CommandButton(
-                icon: Icons.lock_open_rounded,
-                label: 'Unlock',
-                onPressed: laptop?.remoteUnlockReady == true
-                    ? widget.controller.unlockLaptopFromPhone
-                    : null,
-              ),
-              _CommandButton(
                 icon: Icons.sync_rounded,
                 label: 'Refresh',
                 onPressed: () =>
@@ -962,113 +980,6 @@ class _LaptopControlsState extends State<_LaptopControls> {
   }
 }
 
-class _RemoteUnlockPanel extends StatefulWidget {
-  const _RemoteUnlockPanel({required this.controller});
-
-  final ConnectorController controller;
-
-  @override
-  State<_RemoteUnlockPanel> createState() => _RemoteUnlockPanelState();
-}
-
-class _RemoteUnlockPanelState extends State<_RemoteUnlockPanel> {
-  final TextEditingController _passwordController = TextEditingController();
-  bool _saving = false;
-
-  @override
-  void dispose() {
-    _passwordController.dispose();
-    super.dispose();
-  }
-
-  Future<void> _save() async {
-    setState(() => _saving = true);
-    final saved = await widget.controller.saveWindowsUnlockPassword(
-      _passwordController.text,
-    );
-    _passwordController.clear();
-    if (!mounted) {
-      return;
-    }
-    setState(() => _saving = false);
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          saved
-              ? 'Remote unlock password saved on this laptop'
-              : 'Could not save the password',
-        ),
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final saved = widget.controller.windowsUnlockPasswordSaved;
-    final colors = Theme.of(context).extension<ConnectorColors>()!;
-
-    return _Panel(
-      title: 'Remote Unlock',
-      icon: Icons.lock_open_rounded,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Text(
-            saved
-                ? 'Ready. The password is encrypted by Windows on this laptop only.'
-                : 'Save the Windows password here before locking the laptop.',
-            style: Theme.of(
-              context,
-            ).textTheme.bodyMedium?.copyWith(color: colors.bodyText),
-          ),
-          const SizedBox(height: 12),
-          TextField(
-            controller: _passwordController,
-            obscureText: true,
-            decoration: const InputDecoration(
-              labelText: 'Windows password',
-              prefixIcon: Icon(Icons.password_rounded),
-              border: OutlineInputBorder(),
-              isDense: true,
-            ),
-            onSubmitted: (_) {
-              if (!_saving) {
-                _save();
-              }
-            },
-          ),
-          const SizedBox(height: 10),
-          Wrap(
-            spacing: 10,
-            runSpacing: 10,
-            children: [
-              FilledButton.icon(
-                onPressed: _saving ? null : _save,
-                icon: const Icon(Icons.save_rounded),
-                label: Text(saved ? 'Update' : 'Save'),
-              ),
-              FilledButton.tonalIcon(
-                onPressed: saved
-                    ? widget.controller.clearWindowsUnlockPassword
-                    : null,
-                icon: const Icon(Icons.delete_outline_rounded),
-                label: const Text('Clear'),
-              ),
-            ],
-          ),
-          const SizedBox(height: 10),
-          Text(
-            'The phone will ask for fingerprint or device PIN before sending the unlock command.',
-            style: Theme.of(
-              context,
-            ).textTheme.bodySmall?.copyWith(color: colors.bodyText),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
 class _ResponsiveGrid extends StatelessWidget {
   const _ResponsiveGrid({required this.wide, required this.children});
 
@@ -1088,14 +999,12 @@ class _ResponsiveGrid extends StatelessWidget {
 
     return GridView.builder(
       shrinkWrap: true,
-      physics:
-          const NeverScrollableScrollPhysics(), // To prevent nested scrolling
+      physics: const NeverScrollableScrollPhysics(),
       gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-        maxCrossAxisExtent: 370.0, // Max width for each item
+        maxCrossAxisExtent: 370.0,
         mainAxisSpacing: 14.0,
         crossAxisSpacing: 14.0,
-        childAspectRatio:
-            0.8, // Adjust this value to control item height relative to width
+        childAspectRatio: 0.8,
       ),
       itemCount: children.length,
       itemBuilder: (context, index) {
@@ -1155,7 +1064,6 @@ class _CommandButton extends StatelessWidget {
 
   final IconData icon;
   final String label;
-
   final VoidCallback? onPressed;
 
   @override
