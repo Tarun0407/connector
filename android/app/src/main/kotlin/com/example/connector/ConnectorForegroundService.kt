@@ -18,6 +18,13 @@ class ConnectorForegroundService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_STOP) {
+            @Suppress("DEPRECATION")
+            stopForeground(true)
+            stopSelf()
+            android.os.Process.killProcess(android.os.Process.myPid())
+            return START_NOT_STICKY
+        }
         return START_STICKY
     }
 
@@ -38,6 +45,17 @@ class ConnectorForegroundService : Service() {
             @Suppress("DEPRECATION")
             Notification.Builder(this)
         }
+
+        // Add Exit action button
+        val stopIntent = Intent(this, ConnectorForegroundService::class.java)
+        stopIntent.action = ACTION_STOP
+        val stopPendingIntent = PendingIntent.getService(
+            this,
+            1,
+            stopIntent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+        builder.addAction(android.R.drawable.ic_menu_close_clear_cancel, "Exit", stopPendingIntent)
 
         return builder
             .setSmallIcon(applicationInfo.icon)
@@ -65,5 +83,6 @@ class ConnectorForegroundService : Service() {
     companion object {
         private const val CHANNEL_ID = "connector_background"
         private const val NOTIFICATION_ID = 1208
+        private const val ACTION_STOP = "com.example.connector.STOP_FOREGROUND"
     }
 }

@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'dart:io'; // Added for File support
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:file_picker/file_picker.dart'; // Added for file picking
 
 import 'connector_controller.dart';
 import 'models.dart';
@@ -227,10 +229,12 @@ class _PairingPanel extends StatelessWidget {
     required this.onSettings,
     required this.onDone,
   });
+
   final ConnectorController controller;
   final TextEditingController textController;
   final VoidCallback onSettings;
   final VoidCallback onDone;
+
   @override
   Widget build(BuildContext context) {
     return Card(
@@ -301,24 +305,38 @@ class _SettingsSheet extends StatefulWidget {
   const _SettingsSheet({required this.controller});
 
   final ConnectorController controller;
+
   @override
   State<_SettingsSheet> createState() => _SettingsSheetState();
 }
 
 class _SettingsSheetState extends State<_SettingsSheet> {
+  late final TextEditingController _limitController;
+
   @override
   void initState() {
     super.initState();
+    _limitController = TextEditingController(
+      text: widget.controller.maxCloudUploadSize.toString(),
+    );
     widget.controller.addListener(_onControllerChanged);
   }
 
   void _onControllerChanged() {
-    if (mounted) setState(() {});
+    if (mounted) {
+      // Sync the text field if the value changes externally
+      if (_limitController.text !=
+          widget.controller.maxCloudUploadSize.toString()) {
+        _limitController.text = widget.controller.maxCloudUploadSize.toString();
+      }
+      setState(() {});
+    }
   }
 
   @override
   void dispose() {
     widget.controller.removeListener(_onControllerChanged);
+    _limitController.dispose();
     super.dispose();
   }
 
@@ -367,20 +385,13 @@ class _SettingsSheetState extends State<_SettingsSheet> {
                             children: [
                               const Text('Pairing code'),
                               const SizedBox(height: 6),
-                              AnimatedBuilder(
-                                animation: c,
-                                builder: (context, child) {
-                                  return Text(
-                                    c.roomCode ?? '',
-                                    style: Theme.of(context)
-                                        .textTheme
-                                        .titleMedium
-                                        ?.copyWith(
-                                          fontWeight: FontWeight.w800,
-                                          letterSpacing: 1.2,
-                                        ),
-                                  );
-                                },
+                              Text(
+                                c.roomCode ?? '',
+                                style: Theme.of(context).textTheme.titleMedium
+                                    ?.copyWith(
+                                      fontWeight: FontWeight.w800,
+                                      letterSpacing: 1.2,
+                                    ),
                               ),
                             ],
                           ),
@@ -399,18 +410,13 @@ class _SettingsSheetState extends State<_SettingsSheet> {
                           icon: const Icon(Icons.copy_rounded),
                         ),
                         const SizedBox(width: 8),
-                        AnimatedBuilder(
-                          animation: c,
-                          builder: (context, child) {
-                            return IconButton.filledTonal(
-                              onPressed: c.isBooting
-                                  ? null
-                                  : () async {
-                                      await c.generateNewRoom();
-                                    },
-                              icon: const Icon(Icons.refresh_rounded),
-                            );
-                          },
+                        IconButton.filledTonal(
+                          onPressed: c.isBooting
+                              ? null
+                              : () async {
+                                  await c.generateNewRoom();
+                                },
+                          icon: const Icon(Icons.refresh_rounded),
                         ),
                       ],
                     ),
@@ -429,12 +435,37 @@ class _SettingsSheetState extends State<_SettingsSheet> {
                         );
                       },
                       secondary: const Icon(Icons.settings_ethernet_rounded),
-                      title: const Text('Priority: Local WiFi'),
+                      title: const Text('Local WiFi direct'),
                       subtitle: Text(
                         c.currentMode == ConnectivityMode.wifi
-                            ? 'Tries Local WiFi first, then Cloud'
-                            : 'Uses Cloud Server directly',
+                            ? 'Send commands & files over local network first (faster, unlimited)'
+                            : 'Route everything through Firebase Cloud (slower, size-limited)',
                       ),
+                    );
+                  },
+                ),
+                const SizedBox(height: 8),
+                AnimatedBuilder(
+                  animation: c,
+                  builder: (context, child) {
+                    return TextField(
+                      controller: _limitController,
+                      keyboardType: TextInputType.number,
+                      textInputAction: TextInputAction.done,
+                      decoration: const InputDecoration(
+                        labelText: 'Cloud Upload Limit (MB)',
+                        prefixIcon: Icon(Icons.cloud_upload_rounded),
+                        border: OutlineInputBorder(),
+                        isDense: true,
+                      ),
+                      onSubmitted: (value) {
+                        final size = int.tryParse(value) ?? 100;
+                        c.setMaxCloudUploadSize(size);
+                      },
+                      onEditingComplete: () {
+                        final size = int.tryParse(_limitController.text) ?? 100;
+                        c.setMaxCloudUploadSize(size);
+                      },
                     );
                   },
                 ),
@@ -450,6 +481,24 @@ class _SettingsSheetState extends State<_SettingsSheet> {
                       title: const Text('Autostart'),
                       subtitle: Text(
                         c.autoStartEnabled ? 'Enabled' : 'Disabled',
+                      ),
+                    );
+                  },
+                ),
+                const SizedBox(height: 8),
+                AnimatedBuilder(
+                  animation: c,
+                  builder: (context, child) {
+                    return SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      value: c.clipboardSyncEnabled,
+                      onChanged: (v) => c.setClipboardSync(v),
+                      secondary: const Icon(Icons.content_paste_rounded),
+                      title: const Text('Clipboard sync'),
+                      subtitle: Text(
+                        c.clipboardSyncEnabled
+                            ? 'Syncs clipboard with paired device'
+                            : 'Clipboard changes stay local',
                       ),
                     );
                   },
@@ -517,6 +566,33 @@ class _SettingsSheetState extends State<_SettingsSheet> {
                   ),
                 ],
                 const SizedBox(height: 12),
+                FilledButton.tonal(
+                  onPressed: () async {
+                    final navigator = Navigator.of(context);
+                    final confirmed = await showDialog<bool>(
+                      context: context,
+                      builder: (ctx) => AlertDialog(
+                        title: const Text('Exit Connector?'),
+                        content: const Text('This will stop background services and close the app.'),
+                        actions: [
+                          TextButton(
+                            onPressed: () => Navigator.of(ctx).pop(false),
+                            child: const Text('Cancel'),
+                          ),
+                          TextButton(
+                            onPressed: () => Navigator.of(ctx).pop(true),
+                            child: const Text('Exit'),
+                          ),
+                        ],
+                      ),
+                    );
+                    if (confirmed == true) {
+                      navigator.pop();
+                      await c.platform.exitApp();
+                    }
+                  },
+                  child: const Text('Exit app'),
+                ),
               ],
             ),
           ),
@@ -661,6 +737,20 @@ class _LaptopHome extends StatelessWidget {
         ),
       ),
       _Panel(
+        title: 'Send to Phone',
+        icon: Icons.file_upload_rounded,
+        child: phoneOnline
+            ? _CommandButton(
+                icon: Icons.attach_file_rounded,
+                label: 'Send File',
+                onPressed: () => _pickAndSendFileToPhone(context, controller),
+              )
+            : const _EmptyState(
+                icon: Icons.phone_disabled_rounded,
+                label: 'No phone connected',
+              ),
+      ),
+      _Panel(
         title: 'Phone Status',
         icon: Icons.sensors_rounded,
         child: phone == null
@@ -669,6 +759,36 @@ class _LaptopHome extends StatelessWidget {
                 label: 'No phone paired',
               )
             : _DeviceSummary(device: phone, online: phoneOnline),
+      ),
+      _Panel(
+        title: 'Received Files',
+        icon: Icons.download_rounded,
+        child: controller.receivedFiles.isEmpty
+            ? const _EmptyState(
+                icon: Icons.folder_open_rounded,
+                label: 'No files received yet',
+              )
+            : ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 240),
+                child: ListView.separated(
+                  shrinkWrap: true,
+                  itemBuilder: (context, index) {
+                    final fileName = controller.receivedFiles[index];
+                    return ListTile(
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
+                      leading: const Icon(Icons.insert_drive_file_rounded),
+                      title: Text(
+                        fileName,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    );
+                  },
+                  separatorBuilder: (_, _) => const Divider(height: 1),
+                  itemCount: controller.receivedFiles.length,
+                ),
+              ),
       ),
       _Panel(
         title: 'Recent Activity',
@@ -686,20 +806,50 @@ class _LaptopHome extends StatelessWidget {
   }
 }
 
-class _PhoneHome extends StatelessWidget {
+class _PhoneHome extends StatefulWidget {
   const _PhoneHome({required this.controller, required this.wide});
 
   final ConnectorController controller;
   final bool wide;
 
   @override
+  State<_PhoneHome> createState() => _PhoneHomeState();
+}
+
+class _PhoneHomeState extends State<_PhoneHome> {
+  bool _uploading = false;
+
+  Future<void> _pickAndSendFile() async {
+    FilePickerResult? result = await FilePicker.pickFiles();
+
+    if (result != null && result.files.single.path != null) {
+      setState(() => _uploading = true);
+      final path = result.files.single.path!;
+      final file = File(path);
+      final success = await widget.controller.sendFile(file);
+      setState(() => _uploading = false);
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            success ? 'File sent successfully!' : 'Failed to send file',
+          ),
+          backgroundColor: success ? Colors.green : Colors.red,
+        ),
+      );
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final laptop = controller.primaryLaptop;
-    final laptopOnline = laptop != null && controller.isDeviceOnline(laptop);
+    final laptop = widget.controller.primaryLaptop;
+    final laptopOnline =
+        laptop != null && widget.controller.isDeviceOnline(laptop);
 
     final children = [
       if (laptopOnline)
-        _LaptopControls(controller: controller, laptop: laptop)
+        _LaptopControls(controller: widget.controller, laptop: laptop)
       else
         const _DisconnectedPanel(
           title: 'Laptop disconnected',
@@ -707,14 +857,78 @@ class _PhoneHome extends StatelessWidget {
           icon: Icons.laptop_chromebook_rounded,
         ),
       _Panel(
+        title: 'File Transfer',
+        icon: Icons.file_upload_rounded,
+        child: Wrap(
+          spacing: 10,
+          runSpacing: 10,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            if (_uploading)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 8, horizontal: 4),
+                child: SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+              )
+            else
+              _CommandButton(
+                icon: Icons.attach_file_rounded,
+                label: 'Send File',
+                onPressed: _pickAndSendFile,
+              ),
+            _StatusPill(
+              icon: Icons.info_outline_rounded,
+              label: 'Limit: ${widget.controller.maxCloudUploadSize}MB',
+            ),
+          ],
+        ),
+      ),
+      _Panel(
+        title: 'Received Files',
+        icon: Icons.download_rounded,
+        child: widget.controller.phoneReceivedFiles.isEmpty
+            ? const _EmptyState(
+                icon: Icons.folder_open_rounded,
+                label: 'No files received yet',
+              )
+            : ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 240),
+                child: ListView.separated(
+                  shrinkWrap: true,
+                  itemBuilder: (context, index) {
+                    final fileName =
+                        widget.controller.phoneReceivedFiles[index];
+                    return ListTile(
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
+                      leading: const Icon(Icons.insert_drive_file_rounded),
+                      title: Text(
+                        fileName,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    );
+                  },
+                  separatorBuilder: (_, _) => const Divider(height: 1),
+                  itemCount: widget.controller.phoneReceivedFiles.length,
+                ),
+              ),
+      ),
+      _Panel(
         title: 'Activity Log',
         icon: Icons.history_rounded,
-        child: _ActivityList(events: controller.events),
+        child: _ActivityList(events: widget.controller.events),
       ),
       _Panel(
         title: 'Paired Devices',
         icon: Icons.devices_rounded,
-        child: _DeviceList(controller: controller, devices: controller.devices),
+        child: _DeviceList(
+          controller: widget.controller,
+          devices: widget.controller.devices,
+        ),
       ),
       _Panel(
         title: 'This Phone',
@@ -728,59 +942,60 @@ class _PhoneHome extends StatelessWidget {
               crossAxisAlignment: WrapCrossAlignment.center,
               children: [
                 _StatusPill(
-                  icon: controller.phoneAdminEnabled
+                  icon: widget.controller.phoneAdminEnabled
                       ? Icons.verified_user_rounded
                       : Icons.no_encryption_rounded,
-                  label: controller.phoneAdminEnabled
+                  label: widget.controller.phoneAdminEnabled
                       ? 'Admin on'
                       : 'Admin off',
                 ),
                 _CommandButton(
                   icon: Icons.admin_panel_settings_rounded,
                   label: 'Enable',
-                  onPressed: controller.requestPhoneAdminLocally,
+                  onPressed: widget.controller.requestPhoneAdminLocally,
                 ),
                 _CommandButton(
                   icon: Icons.notifications_off_rounded,
                   label: 'Stop ring',
-                  onPressed: () => controller.platform.stopRingPhone(),
+                  onPressed: () => widget.controller.platform.stopRingPhone(),
                 ),
                 _StatusPill(
-                  icon: controller.canPostNotifications
+                  icon: widget.controller.canPostNotifications
                       ? Icons.notification_important_rounded
                       : Icons.notifications_none_rounded,
-                  label: controller.canPostNotifications
+                  label: widget.controller.canPostNotifications
                       ? 'Notify on'
                       : 'Notify off',
                 ),
                 _CommandButton(
                   icon: Icons.add_alert_rounded,
                   label: 'Allow notify',
-                  onPressed: controller.requestNotificationSendingPermission,
+                  onPressed:
+                      widget.controller.requestNotificationSendingPermission,
                 ),
                 _StatusPill(
-                  icon: controller.notificationAccessEnabled
+                  icon: widget.controller.notificationAccessEnabled
                       ? Icons.notifications_active_rounded
                       : Icons.notifications_paused_rounded,
-                  label: controller.notificationAccessEnabled
+                  label: widget.controller.notificationAccessEnabled
                       ? 'Mirror on'
                       : 'Mirror off',
                 ),
                 _CommandButton(
                   icon: Icons.notification_add_rounded,
                   label: 'Mirror',
-                  onPressed: controller.openNotificationAccessSettings,
+                  onPressed: widget.controller.openNotificationAccessSettings,
                 ),
               ],
             ),
             const SizedBox(height: 12),
-            _AutoStartSwitch(controller: controller),
+            _AutoStartSwitch(controller: widget.controller),
           ],
         ),
       ),
     ];
 
-    return _ResponsiveGrid(wide: wide, children: children);
+    return _ResponsiveGrid(wide: widget.wide, children: children);
   }
 }
 
@@ -1320,6 +1535,24 @@ class _EmptyState extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+Future<void> _pickAndSendFileToPhone(
+    BuildContext context, ConnectorController controller) async {
+  final result = await FilePicker.pickFiles();
+  if (result != null && result.files.single.path != null) {
+    final file = File(result.files.single.path!);
+    final success = await controller.sendFileToPhone(file);
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          success ? 'File sent to phone!' : 'Failed to send to phone',
+        ),
+        backgroundColor: success ? Colors.green : Colors.red,
       ),
     );
   }

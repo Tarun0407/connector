@@ -27,8 +27,8 @@ enum ConnectivityMode {
   net;
 
   String get label =>
-      this == ConnectivityMode.wifi ? 'WiFi (Local)' : 'Internet (Cloud)';
-  String get key => this.name;
+      name == ConnectivityMode.wifi.name ? 'WiFi (Local)' : 'Internet (Cloud)';
+  String get key => name;
 }
 
 DeviceRole detectDeviceRole() {
@@ -179,6 +179,8 @@ class RemoteDevice {
     this.media,
     this.localIp,
     this.connectivityMode = ConnectivityMode.wifi,
+    this.clipboard,
+    this.clipboardSync = false,
   });
 
   factory RemoteDevice.fromDoc(String id, Map<String, Object?> data) {
@@ -222,6 +224,8 @@ class RemoteDevice {
       media: mediaValue is Map
           ? MediaState.fromMap(mediaValue.cast<String, Object?>())
           : null,
+      clipboard: (data['clipboard'] as String?),
+      clipboardSync: data['clipboardSync'] == true,
     );
   }
 
@@ -242,6 +246,8 @@ class RemoteDevice {
   final String? localIp;
   final ConnectivityMode connectivityMode;
   final MediaState? media;
+  final String? clipboard;
+  final bool clipboardSync;
 }
 
 class ActivityEvent {

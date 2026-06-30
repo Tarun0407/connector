@@ -63,6 +63,16 @@ class MainActivity : FlutterActivity() {
                 "isAutoStartEnabled" -> result.success(isAutoStartEnabled())
                 "openAutoStartSettings" -> result.success(openAutoStartSettings())
                 "authenticateForRemoteUnlock" -> authenticateForRemoteUnlock(result)
+                "exitApp" -> {
+                    val stopIntent = Intent(this, ConnectorForegroundService::class.java)
+                    stopIntent.action = "com.example.connector.STOP_FOREGROUND"
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        startForegroundService(stopIntent)
+                    } else {
+                        startService(stopIntent)
+                    }
+                    result.success(true)
+                }
                 else -> result.notImplemented()
             }
         }
@@ -74,6 +84,18 @@ class MainActivity : FlutterActivity() {
         if (requestCode == REMOTE_UNLOCK_AUTH_REQUEST) {
             pendingRemoteUnlockAuthResult?.success(resultCode == RESULT_OK)
             pendingRemoteUnlockAuthResult = null
+        }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == POST_NOTIFICATIONS_REQUEST) {
+            methodChannel?.invokeMethod("postNotificationsResult", grantResults.isNotEmpty() &&
+                grantResults[0] == PackageManager.PERMISSION_GRANTED)
         }
     }
 
@@ -497,6 +519,9 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun acquireWakeLock() {
+        wakeLock?.let { lock ->
+            if (lock.isHeld) lock.release()
+        }
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = powerManager.newWakeLock(
             PowerManager.PARTIAL_WAKE_LOCK,

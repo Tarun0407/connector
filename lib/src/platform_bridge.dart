@@ -137,6 +137,10 @@ class ConnectorPlatformBridge {
     });
   }
 
+  Future<bool> minimizeToTray() => _invokeBool('minimizeToTray');
+
+  Future<bool> exitApp() => _invokeBool('exitApp');
+
   Future<bool> showLaptopMediaNotification(MediaState media) {
     return _invokeBool('showLaptopMediaNotification', {
       'title': media.title,
