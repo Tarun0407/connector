@@ -40,13 +40,16 @@ class ConnectorController extends ChangeNotifier {
   String statusMessage = 'Starting';
   String? laptopLocalIp;
   String? localIp;
-  ConnectivityMode currentMode = ConnectivityMode.wifi;
+  bool isWifiReachable = false;
   int maxCloudUploadSize = 100;
   List<RemoteDevice> devices = const [];
   List<ActivityEvent> events = const [];
   List<WindowEntry> windows = const [];
   List<String> receivedFiles = const [];
   List<String> phoneReceivedFiles = const [];
+  double? uploadProgress;
+  int uploadCurrent = 0;
+  int uploadTotal = 0;
   double? laptopVolume;
   bool? laptopMuted;
   MediaState? laptopMedia;
@@ -294,10 +297,9 @@ class ConnectorController extends ChangeNotifier {
   Future<bool> sendFile(File file) async {
     final sizeInMb = (await file.length()) / (1024 * 1024);
 
-    // 1. Try Local WiFi first if mode is set to WIFI (Unlimited)
-    if (currentMode == ConnectivityMode.wifi &&
-        role == DeviceRole.phone &&
-        laptopLocalIp != null) {
+    if (isWifiReachable && laptopLocalIp != null) {
+      uploadProgress = null;
+      _safeNotify();
       final success = await _localClient.sendFile(laptopLocalIp!, file);
       if (success) {
         statusMessage = 'File sent via Local WiFi!';
@@ -306,10 +308,7 @@ class ConnectorController extends ChangeNotifier {
       }
     }
 
-    // 2. Fallback to Cloud if size is within limits
     if (sizeInMb <= maxCloudUploadSize) {
-      statusMessage = 'Uploading to Cloud...';
-      _safeNotify();
       return await _uploadFileToCloud(file);
     } else {
       statusMessage = 'File too large for Cloud! Connect to WiFi.';
@@ -323,15 +322,30 @@ class ConnectorController extends ChangeNotifier {
       if (roomCode == null) return false;
 
       final fileName = file.path.split(Platform.pathSeparator).last;
-      // Path aligned with Security Rules: /uploads/{roomCode}/{deviceId}/{fileName}
       final ref = FirebaseStorage.instance.ref().child(
         'uploads/$roomCode/$deviceId/$fileName',
       );
 
-      await ref.putFile(file);
+      uploadProgress = 0;
+      uploadCurrent = 1;
+      uploadTotal = 1;
+      _safeNotify();
+
+      final task = ref.putFile(file);
+      task.snapshotEvents.listen((snap) {
+        if (snap.totalBytes > 0) {
+          uploadProgress = snap.bytesTransferred / snap.totalBytes;
+          statusMessage = 'Uploading $fileName ${(uploadProgress! * 100).toStringAsFixed(0)}%';
+          _safeNotify();
+        }
+      });
+
+      await task;
       final url = await ref.getDownloadURL();
 
-      // Tell the laptop to download the file from this secure URL
+      uploadProgress = null;
+      _safeNotify();
+
       await sendLaptopCommand(
         'laptop.receiveFile',
         payload: {'url': url, 'fileName': fileName},
@@ -341,6 +355,7 @@ class ConnectorController extends ChangeNotifier {
       _safeNotify();
       return true;
     } catch (e) {
+      uploadProgress = null;
       statusMessage = 'Cloud upload failed: $e';
       _safeNotify();
       return false;
@@ -351,9 +366,10 @@ class ConnectorController extends ChangeNotifier {
     return sendCommand(DeviceRole.phone, type);
   }
 
-  Future<void> setConnectivityMode(ConnectivityMode mode) async {
-    currentMode = mode;
-    await _updatePresence(extra: {'connectivityMode': mode.key});
+  void _checkLocalReachability() {
+    isWifiReachable = role == DeviceRole.phone
+        ? laptopLocalIp != null && laptopLocalIp!.isNotEmpty
+        : primaryPhone?.localIp != null && primaryPhone!.localIp!.isNotEmpty;
     _safeNotify();
   }
 
@@ -361,9 +377,7 @@ class ConnectorController extends ChangeNotifier {
     String type, {
     Map<String, Object?> payload = const {},
   }) async {
-    if (currentMode == ConnectivityMode.wifi &&
-        role == DeviceRole.phone &&
-        laptopLocalIp != null) {
+    if (isWifiReachable && laptopLocalIp != null) {
       final localCommand = _mapCommandToLocal(type);
       if (localCommand != null) {
         final success = await _localClient.sendCommand(
@@ -466,7 +480,7 @@ class ConnectorController extends ChangeNotifier {
         'muted': fetchedMuted ?? FieldValue.delete(),
         'media': fetchedMedia?.toMap() ?? FieldValue.delete(),
         'localIp': localIp ?? FieldValue.delete(),
-        'connectivityMode': currentMode.key,
+        'wifiReachable': isWifiReachable,
       },
     );
     _safeNotify();
@@ -553,6 +567,7 @@ class ConnectorController extends ChangeNotifier {
       if (role == DeviceRole.phone) {
         final laptop = primaryLaptop;
         laptopLocalIp = laptop?.localIp;
+        _checkLocalReachability();
 
         final media = laptop?.media;
         if (laptop == null || media == null || !isDeviceOnline(laptop)) {
@@ -957,6 +972,16 @@ class ConnectorController extends ChangeNotifier {
     };
   }
 
+  Future<void> openReceivedFile(String fullPath) async {
+    final file = File(fullPath);
+    if (!await file.exists()) {
+      statusMessage = 'File not found: $fullPath';
+      _safeNotify();
+      return;
+    }
+    await platform.openFile(fullPath);
+  }
+
   void _safeNotify() {
     if (!_disposed) notifyListeners();
   }
@@ -998,7 +1023,7 @@ class ConnectorController extends ChangeNotifier {
           await sink.flush();
           await sink.close();
           statusMessage = 'Received file: $fileName';
-          receivedFiles = [fileName, ...receivedFiles.take(19)];
+          receivedFiles = [file.path, ...receivedFiles.take(19)];
           unawaited(
             platform.showSystemNotification(
               title: 'File received',
@@ -1103,7 +1128,6 @@ class ConnectorController extends ChangeNotifier {
         final buf = bb.toBytes();
         if (headerEnd >= buf.length || sink == null) return;
 
-        // Write accumulated file data past the header
         final fileData = buf.sublist(headerEnd);
         final needed = fileSize - written;
         final toWrite = fileData.length > needed ? fileData.sublist(0, needed) : fileData;
@@ -1114,9 +1138,10 @@ class ConnectorController extends ChangeNotifier {
         bb.clear();
 
         if (written >= fileSize) {
+          final fullPath = '$_phoneDownloadsDir${Platform.pathSeparator}$fileName';
           sink!.closeSync();
           socket.close();
-          phoneReceivedFiles = [fileName!, ...phoneReceivedFiles.take(19)];
+          phoneReceivedFiles = [fullPath, ...phoneReceivedFiles.take(19)];
           statusMessage = 'Received file: $fileName';
           unawaited(_publishEvent(
             type: 'file.received',
@@ -1141,9 +1166,11 @@ class ConnectorController extends ChangeNotifier {
   Future<bool> sendFileToPhone(File file) async {
     final sizeInMb = (await file.length()) / (1024 * 1024);
 
-    if (currentMode == ConnectivityMode.wifi) {
+    if (isWifiReachable) {
       final phone = primaryPhone;
       if (phone?.localIp != null) {
+        uploadProgress = null;
+        _safeNotify();
         final success = await _localClient.sendFileToPhone(phone!.localIp!, file);
         if (success) {
           statusMessage = 'File sent to phone via Local WiFi!';
@@ -1154,8 +1181,6 @@ class ConnectorController extends ChangeNotifier {
     }
 
     if (sizeInMb <= maxCloudUploadSize) {
-      statusMessage = 'Uploading to Cloud...';
-      _safeNotify();
       return await _uploadFileToCloudPhone(file);
     } else {
       statusMessage = 'File too large for Cloud! Connect to WiFi.';
@@ -1173,8 +1198,25 @@ class ConnectorController extends ChangeNotifier {
         'uploads/$roomCode/$deviceId/$fileName',
       );
 
-      await ref.putFile(file);
+      uploadProgress = 0;
+      uploadCurrent = 1;
+      uploadTotal = 1;
+      _safeNotify();
+
+      final task = ref.putFile(file);
+      task.snapshotEvents.listen((snap) {
+        if (snap.totalBytes > 0) {
+          uploadProgress = snap.bytesTransferred / snap.totalBytes;
+          statusMessage = 'Uploading $fileName ${(uploadProgress! * 100).toStringAsFixed(0)}%';
+          _safeNotify();
+        }
+      });
+
+      await task;
       final url = await ref.getDownloadURL();
+
+      uploadProgress = null;
+      _safeNotify();
 
       await sendCommand(
         DeviceRole.phone,
@@ -1186,6 +1228,7 @@ class ConnectorController extends ChangeNotifier {
       _safeNotify();
       return true;
     } catch (e) {
+      uploadProgress = null;
       statusMessage = 'Cloud upload to phone failed: $e';
       _safeNotify();
       return false;
@@ -1213,7 +1256,7 @@ class ConnectorController extends ChangeNotifier {
           await sink.flush();
           await sink.close();
           statusMessage = 'Received file: $fileName';
-          phoneReceivedFiles = [fileName, ...phoneReceivedFiles.take(19)];
+          phoneReceivedFiles = [file.path, ...phoneReceivedFiles.take(19)];
           unawaited(
             platform.showSystemNotification(
               title: 'File received',

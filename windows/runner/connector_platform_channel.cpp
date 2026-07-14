@@ -576,6 +576,14 @@ void HandleMethodCall(
         result->Success(EncodableValue(true));
         return;
     }
+    if (method == "openFile") {
+        std::string path = ReadStringArgument(call.arguments(), "path", "");
+        if (!path.empty()) {
+            ShellExecuteW(nullptr, L"open", Utf8ToWide(path).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        }
+        result->Success(EncodableValue(true));
+        return;
+    }
 
     result->NotImplemented();
 }

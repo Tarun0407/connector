@@ -201,14 +201,24 @@ class _TopBar extends StatelessWidget {
                   color: colors.bodyText,
                 ),
               ),
+              if (controller.uploadProgress != null) ...[
+                const SizedBox(height: 4),
+                LinearProgressIndicator(
+                  value: controller.uploadProgress,
+                  minHeight: 4,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ],
             ],
           ),
         ),
         _StatusPill(
-          icon: controller.currentMode == ConnectivityMode.wifi
+          icon: controller.isWifiReachable
               ? Icons.wifi_rounded
               : Icons.language_rounded,
-          label: controller.currentMode.label,
+          label: controller.isWifiReachable
+              ? 'Connected (WiFi)'
+              : 'Connected (Cloud)',
         ),
         const SizedBox(width: 8),
         _StatusPill(
@@ -426,20 +436,39 @@ class _SettingsSheetState extends State<_SettingsSheet> {
                 AnimatedBuilder(
                   animation: c,
                   builder: (context, child) {
-                    return SwitchListTile(
-                      contentPadding: EdgeInsets.zero,
-                      value: c.currentMode == ConnectivityMode.wifi,
-                      onChanged: (v) {
-                        c.setConnectivityMode(
-                          v ? ConnectivityMode.wifi : ConnectivityMode.net,
-                        );
-                      },
-                      secondary: const Icon(Icons.settings_ethernet_rounded),
-                      title: const Text('Local WiFi direct'),
-                      subtitle: Text(
-                        c.currentMode == ConnectivityMode.wifi
-                            ? 'Send commands & files over local network first (faster, unlimited)'
-                            : 'Route everything through Firebase Cloud (slower, size-limited)',
+                    return Card(
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                        child: Row(
+                          children: [
+                            Icon(
+                              c.isWifiReachable
+                                  ? Icons.wifi_rounded
+                                  : Icons.cloud_rounded,
+                              color: c.isWifiReachable ? Colors.green : Colors.grey,
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    c.isWifiReachable
+                                        ? 'Connected via Local WiFi'
+                                        : 'Connected via Cloud',
+                                    style: const TextStyle(fontWeight: FontWeight.w600),
+                                  ),
+                                  Text(
+                                    c.isWifiReachable
+                                        ? 'File size: unlimited'
+                                        : 'File size: ${c.maxCloudUploadSize}MB limit',
+                                    style: Theme.of(context).textTheme.bodySmall,
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
                     );
                   },
@@ -774,15 +803,18 @@ class _LaptopHome extends StatelessWidget {
                   shrinkWrap: true,
                   itemBuilder: (context, index) {
                     final fileName = controller.receivedFiles[index];
+                    final fullPath = fileName;
+                    final displayName = fullPath.split('\\').last.split('/').last;
                     return ListTile(
                       dense: true,
                       contentPadding: EdgeInsets.zero,
                       leading: const Icon(Icons.insert_drive_file_rounded),
                       title: Text(
-                        fileName,
+                        displayName,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                       ),
+                      onTap: () => controller.openReceivedFile(fullPath),
                     );
                   },
                   separatorBuilder: (_, _) => const Divider(height: 1),
@@ -901,15 +933,18 @@ class _PhoneHomeState extends State<_PhoneHome> {
                   itemBuilder: (context, index) {
                     final fileName =
                         widget.controller.phoneReceivedFiles[index];
+                    final fullPath = fileName;
+                    final displayName = fullPath.split('\\').last.split('/').last;
                     return ListTile(
                       dense: true,
                       contentPadding: EdgeInsets.zero,
                       leading: const Icon(Icons.insert_drive_file_rounded),
                       title: Text(
-                        fileName,
+                        displayName,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                       ),
+                      onTap: () => widget.controller.openReceivedFile(fullPath),
                     );
                   },
                   separatorBuilder: (_, _) => const Divider(height: 1),

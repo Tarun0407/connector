@@ -73,6 +73,29 @@ class MainActivity : FlutterActivity() {
                     }
                     result.success(true)
                 }
+                "openFile" -> {
+                    val path = call.argument<String>("path") ?: ""
+                    if (path.isNotEmpty()) {
+                        try {
+                            val file = java.io.File(path)
+                            val uri = androidx.core.content.FileProvider.getUriForFile(
+                                this,
+                                "$packageName.fileprovider",
+                                file
+                            )
+                            val mime = java.net.URLConnection.guessContentTypeFromName(path) ?: "*/*"
+                            val intent = Intent(Intent.ACTION_VIEW).apply {
+                                setDataAndType(uri, mime)
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            }
+                            if (intent.resolveActivity(packageManager) != null) {
+                                startActivity(intent)
+                            }
+                        } catch (_: Exception) {}
+                    }
+                    result.success(true)
+                }
                 else -> result.notImplemented()
             }
         }
