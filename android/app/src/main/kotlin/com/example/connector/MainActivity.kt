@@ -96,6 +96,15 @@ class MainActivity : FlutterActivity() {
                     }
                     result.success(true)
                 }
+                "showTransferNotification" -> {
+                    val title = call.argument<String>("title") ?: ""
+                    val fileName = call.argument<String>("fileName") ?: ""
+                    val progress = call.argument<Double>("progress") ?: 0.0
+                    result.success(showTransferNotification(title, fileName, progress))
+                }
+                "cancelTransferNotification" -> {
+                    result.success(cancelTransferNotification())
+                }
                 else -> result.notImplemented()
             }
         }
@@ -278,6 +287,42 @@ class MainActivity : FlutterActivity() {
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         manager.cancel(LAPTOP_MEDIA_NOTIFICATION_ID)
         laptopMediaSession?.isActive = false
+        return true
+    }
+
+    private fun showTransferNotification(title: String, fileName: String, progress: Double): Boolean {
+        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                TRANSFER_CHANNEL_ID,
+                "File transfers",
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                enableVibration(false)
+            }
+            manager.createNotificationChannel(channel)
+        }
+        val max = 100
+        val current = (progress * max).toInt()
+        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Notification.Builder(this, TRANSFER_CHANNEL_ID)
+        } else {
+            @Suppress("DEPRECATION")
+            Notification.Builder(this)
+        }
+        builder
+            .setContentTitle(title)
+            .setContentText(fileName)
+            .setSmallIcon(android.R.drawable.stat_sys_download)
+            .setProgress(max, current, false)
+            .setOngoing(progress < 1.0)
+        manager.notify(FILE_TRANSFER_NOTIFICATION_ID, builder.build())
+        return true
+    }
+
+    private fun cancelTransferNotification(): Boolean {
+        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        manager.cancel(FILE_TRANSFER_NOTIFICATION_ID)
         return true
     }
 
@@ -560,6 +605,8 @@ class MainActivity : FlutterActivity() {
         private const val REMOTE_UNLOCK_AUTH_REQUEST = 1211
         private const val MEDIA_CHANNEL_ID = "connector_laptop_media_v2"
         private const val LAPTOP_MEDIA_NOTIFICATION_ID = 1210
+        private const val TRANSFER_CHANNEL_ID = "connector_file_transfer"
+        private const val FILE_TRANSFER_NOTIFICATION_ID = 1212
         private const val BIOMETRIC_STRONG = 0x000F
         private const val DEVICE_CREDENTIAL = 0x8000
         private var methodChannel: MethodChannel? = null

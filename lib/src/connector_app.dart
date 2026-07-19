@@ -473,28 +473,31 @@ class _SettingsSheetState extends State<_SettingsSheet> {
                     );
                   },
                 ),
-                const SizedBox(height: 8),
                 AnimatedBuilder(
                   animation: c,
                   builder: (context, child) {
-                    return TextField(
-                      controller: _limitController,
-                      keyboardType: TextInputType.number,
-                      textInputAction: TextInputAction.done,
-                      decoration: const InputDecoration(
-                        labelText: 'Cloud Upload Limit (MB)',
-                        prefixIcon: Icon(Icons.cloud_upload_rounded),
-                        border: OutlineInputBorder(),
-                        isDense: true,
+                    if (c.isWifiReachable) return const SizedBox.shrink();
+                    return Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: TextField(
+                        controller: _limitController,
+                        keyboardType: TextInputType.number,
+                        textInputAction: TextInputAction.done,
+                        decoration: const InputDecoration(
+                          labelText: 'Cloud Upload Limit (MB)',
+                          prefixIcon: Icon(Icons.cloud_upload_rounded),
+                          border: OutlineInputBorder(),
+                          isDense: true,
+                        ),
+                        onSubmitted: (value) {
+                          final size = int.tryParse(value) ?? 100;
+                          c.setMaxCloudUploadSize(size);
+                        },
+                        onEditingComplete: () {
+                          final size = int.tryParse(_limitController.text) ?? 100;
+                          c.setMaxCloudUploadSize(size);
+                        },
                       ),
-                      onSubmitted: (value) {
-                        final size = int.tryParse(value) ?? 100;
-                        c.setMaxCloudUploadSize(size);
-                      },
-                      onEditingComplete: () {
-                        final size = int.tryParse(_limitController.text) ?? 100;
-                        c.setMaxCloudUploadSize(size);
-                      },
                     );
                   },
                 ),

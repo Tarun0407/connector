@@ -137,6 +137,22 @@ class ConnectorPlatformBridge {
     });
   }
 
+  Future<bool> showTransferNotification({
+    required String title,
+    required String fileName,
+    double progress = 0,
+  }) {
+    return _invokeBool('showTransferNotification', {
+      'title': title,
+      'fileName': fileName,
+      'progress': progress,
+    });
+  }
+
+  Future<bool> cancelTransferNotification() {
+    return _invokeBool('cancelTransferNotification');
+  }
+
   Future<bool> minimizeToTray() => _invokeBool('minimizeToTray');
 
   Future<bool> exitApp() => _invokeBool('exitApp');

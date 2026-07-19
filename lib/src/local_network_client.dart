@@ -57,6 +57,17 @@ class LocalNetworkClient {
     }
   }
 
+  /// Probes whether a peer is reachable on the local network at [ip]:[port].
+  Future<bool> probeConnectivity(String ip, int port, {Duration timeout = const Duration(seconds: 2)}) async {
+    try {
+      final socket = await Socket.connect(ip, port, timeout: timeout);
+      await socket.close();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   /// Sends a file directly to the phone over the local network.
   Future<bool> sendFileToPhone(String ip, File file) async {
     try {

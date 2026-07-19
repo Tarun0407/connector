@@ -494,6 +494,28 @@ void HandleMethodCall(
         result->Success(EncodableValue(ShowSystemNotification(title, body)));
         return;
     }
+    if (method == "showTransferNotification") {
+        std::string title = ReadStringArgument(call.arguments(), "title", "Transfer");
+        std::string fileName = ReadStringArgument(call.arguments(), "fileName", "");
+        auto* args = std::get_if<EncodableMap>(call.arguments());
+        double progress = 0;
+        if (args) {
+            auto it = args->find(EncodableValue("progress"));
+            if (it != args->end()) {
+                if (auto* d = std::get_if<double>(&it->second)) progress = *d;
+                else if (auto* i = std::get_if<int32_t>(&it->second)) progress = *i;
+                else if (auto* l = std::get_if<int64_t>(&it->second)) progress = static_cast<double>(*l);
+            }
+        }
+        std::string body = fileName + " (" + std::to_string(static_cast<int>(progress * 100)) + "%)";
+        ShowSystemNotification(title, body);
+        result->Success(EncodableValue(true));
+        return;
+    }
+    if (method == "cancelTransferNotification") {
+        result->Success(EncodableValue(true));
+        return;
+    }
     if (method == "getMediaStatus") {
         result->Success(EncodableValue(ReadMediaStatus()));
         return;
