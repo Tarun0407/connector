@@ -6,6 +6,8 @@ import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 
 class ConnectorNotificationListener : NotificationListenerService() {
+    private val lastNotifications = mutableMapOf<String, String>()
+
     override fun onListenerConnected() {
         super.onListenerConnected()
         MainActivity.sendPhoneNotification(
@@ -38,6 +40,16 @@ class ConnectorNotificationListener : NotificationListenerService() {
         val summary = extras.getCharSequence("android.summaryText")?.toString()
         val body = bigText ?: text.ifBlank { summary.orEmpty() }
 
+        // Create a unique key for this notification content
+        val notificationKey = "${sbn.packageName}_${title}_${body}"
+
+        // Only send if the content has actually changed since the last time we saw it
+        if (lastNotifications[sbn.packageName] == notificationKey) {
+            return
+        }
+
+        lastNotifications[sbn.packageName] = notificationKey
+
         MainActivity.sendPhoneNotification(
             mapOf(
                 "package" to sbn.packageName,
@@ -48,3 +60,4 @@ class ConnectorNotificationListener : NotificationListenerService() {
         )
     }
 }
+

@@ -25,6 +25,7 @@ import android.os.CancellationSignal
 import android.os.SystemClock
 import android.os.PowerManager
 import android.provider.Settings
+import androidx.core.content.ContextCompat
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -62,6 +63,48 @@ class MainActivity : FlutterActivity() {
                 "isAutoStartEnabled" -> result.success(isAutoStartEnabled())
                 "openAutoStartSettings" -> result.success(openAutoStartSettings())
                 "authenticateForRemoteUnlock" -> authenticateForRemoteUnlock(result)
+                "exitApp" -> {
+                    val stopIntent = Intent(this, ConnectorForegroundService::class.java)
+                    stopIntent.action = "com.example.connector.STOP_FOREGROUND"
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        startForegroundService(stopIntent)
+                    } else {
+                        startService(stopIntent)
+                    }
+                    result.success(true)
+                }
+                "openFile" -> {
+                    val path = call.argument<String>("path") ?: ""
+                    if (path.isNotEmpty()) {
+                        try {
+                            val file = java.io.File(path)
+                            val uri = androidx.core.content.FileProvider.getUriForFile(
+                                this,
+                                "$packageName.fileprovider",
+                                file
+                            )
+                            val mime = java.net.URLConnection.guessContentTypeFromName(path) ?: "*/*"
+                            val intent = Intent(Intent.ACTION_VIEW).apply {
+                                setDataAndType(uri, mime)
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            }
+                            if (intent.resolveActivity(packageManager) != null) {
+                                startActivity(intent)
+                            }
+                        } catch (_: Exception) {}
+                    }
+                    result.success(true)
+                }
+                "showTransferNotification" -> {
+                    val title = call.argument<String>("title") ?: ""
+                    val fileName = call.argument<String>("fileName") ?: ""
+                    val progress = call.argument<Double>("progress") ?: 0.0
+                    result.success(showTransferNotification(title, fileName, progress))
+                }
+                "cancelTransferNotification" -> {
+                    result.success(cancelTransferNotification())
+                }
                 else -> result.notImplemented()
             }
         }
@@ -73,6 +116,18 @@ class MainActivity : FlutterActivity() {
         if (requestCode == REMOTE_UNLOCK_AUTH_REQUEST) {
             pendingRemoteUnlockAuthResult?.success(resultCode == RESULT_OK)
             pendingRemoteUnlockAuthResult = null
+        }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == POST_NOTIFICATIONS_REQUEST) {
+            methodChannel?.invokeMethod("postNotificationsResult", grantResults.isNotEmpty() &&
+                grantResults[0] == PackageManager.PERMISSION_GRANTED)
         }
     }
 
@@ -141,6 +196,7 @@ class MainActivity : FlutterActivity() {
     private fun authenticateForRemoteUnlock(result: MethodChannel.Result) {
         val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
         if (!keyguardManager.isDeviceSecure) {
+            android.util.Log.d("Connector", "Unlock failed: Device is not secure (no PIN/Fingerprint)")
             result.success(false)
             return
         }
@@ -167,7 +223,8 @@ class MainActivity : FlutterActivity() {
         val cancellationSignal = CancellationSignal()
         val builder = BiometricPrompt.Builder(this)
             .setTitle("Unlock laptop")
-            .setSubtitle("Confirm this is you before Connector sends the unlock command.")
+            .setSubtitle("Confirm this is you before Connector sends the unlock command")
+            
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             builder.setAllowedAuthenticators(BIOMETRIC_STRONG or DEVICE_CREDENTIAL)
@@ -176,27 +233,32 @@ class MainActivity : FlutterActivity() {
             builder.setDeviceCredentialAllowed(true)
         }
 
+        try {
         builder.build().authenticate(
             cancellationSignal,
-            mainExecutor,
+            ContextCompat.getMainExecutor(this),
             object : BiometricPrompt.AuthenticationCallback() {
-                override fun onAuthenticationSucceeded(
-                    authResult: BiometricPrompt.AuthenticationResult
-                ) {
+                    override fun onAuthenticationSucceeded(authResult: BiometricPrompt.AuthenticationResult) {
                     pendingRemoteUnlockAuthResult?.success(true)
-                    pendingRemoteUnlockAuthResult = null
+                        pendingRemoteUnlockAuthResult = null
                 }
 
                 override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+                        android.util.Log.e("Connector", "Biometric Error: $errorCode - $errString")
                     pendingRemoteUnlockAuthResult?.success(false)
                     pendingRemoteUnlockAuthResult = null
                 }
 
                 override fun onAuthenticationFailed() {
-                    // Keep the prompt open. Android will call onAuthenticationError on cancel/lockout.
+                        // Keep the prompt open
                 }
             }
         )
+        } catch (e: Exception) {
+            android.util.Log.e("Connector", "Biometric Prompt Exception: ${e.message}")
+            result.success(false)
+            pendingRemoteUnlockAuthResult = null
+    }
     }
 
     private fun showLaptopMediaNotification(media: Map<*, *>): Boolean {
@@ -225,6 +287,42 @@ class MainActivity : FlutterActivity() {
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         manager.cancel(LAPTOP_MEDIA_NOTIFICATION_ID)
         laptopMediaSession?.isActive = false
+        return true
+    }
+
+    private fun showTransferNotification(title: String, fileName: String, progress: Double): Boolean {
+        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                TRANSFER_CHANNEL_ID,
+                "File transfers",
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                enableVibration(false)
+            }
+            manager.createNotificationChannel(channel)
+        }
+        val max = 100
+        val current = (progress * max).toInt()
+        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Notification.Builder(this, TRANSFER_CHANNEL_ID)
+        } else {
+            @Suppress("DEPRECATION")
+            Notification.Builder(this)
+        }
+        builder
+            .setContentTitle(title)
+            .setContentText(fileName)
+            .setSmallIcon(android.R.drawable.stat_sys_download)
+            .setProgress(max, current, false)
+            .setOngoing(progress < 1.0)
+        manager.notify(FILE_TRANSFER_NOTIFICATION_ID, builder.build())
+        return true
+    }
+
+    private fun cancelTransferNotification(): Boolean {
+        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        manager.cancel(FILE_TRANSFER_NOTIFICATION_ID)
         return true
     }
 
@@ -489,6 +587,9 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun acquireWakeLock() {
+        wakeLock?.let { lock ->
+            if (lock.isHeld) lock.release()
+        }
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = powerManager.newWakeLock(
             PowerManager.PARTIAL_WAKE_LOCK,
@@ -504,6 +605,8 @@ class MainActivity : FlutterActivity() {
         private const val REMOTE_UNLOCK_AUTH_REQUEST = 1211
         private const val MEDIA_CHANNEL_ID = "connector_laptop_media_v2"
         private const val LAPTOP_MEDIA_NOTIFICATION_ID = 1210
+        private const val TRANSFER_CHANNEL_ID = "connector_file_transfer"
+        private const val FILE_TRANSFER_NOTIFICATION_ID = 1212
         private const val BIOMETRIC_STRONG = 0x000F
         private const val DEVICE_CREDENTIAL = 0x8000
         private var methodChannel: MethodChannel? = null
@@ -541,3 +644,4 @@ class MainActivity : FlutterActivity() {
         }
     }
 }
+

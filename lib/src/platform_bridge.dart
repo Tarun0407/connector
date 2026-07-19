@@ -62,22 +62,9 @@ class ConnectorPlatformBridge {
 
   Future<bool> lockComputer() => _invokeBool('lockComputer');
 
-  Future<bool> unlockComputer() => _invokeBool('unlockComputer');
-
-  Future<bool> saveWindowsUnlockPassword(String password) {
-    return _invokeBool('saveWindowsUnlockPassword', {'password': password});
-  }
-
-  Future<bool> hasWindowsUnlockPassword() {
-    return _invokeBool('hasWindowsUnlockPassword');
-  }
-
-  Future<bool> clearWindowsUnlockPassword() {
-    return _invokeBool('clearWindowsUnlockPassword');
-  }
-
-  Future<bool> authenticateForRemoteUnlock() {
-    return _invokeBool('authenticateForRemoteUnlock');
+  Future<String?> getLocalIp() async {
+    final value = await _invoke<Object?>('getLocalIp');
+    return value is String ? value : null;
   }
 
   Future<double?> getVolume() async {
@@ -148,6 +135,30 @@ class ConnectorPlatformBridge {
       'title': title,
       'body': body,
     });
+  }
+
+  Future<bool> showTransferNotification({
+    required String title,
+    required String fileName,
+    double progress = 0,
+  }) {
+    return _invokeBool('showTransferNotification', {
+      'title': title,
+      'fileName': fileName,
+      'progress': progress,
+    });
+  }
+
+  Future<bool> cancelTransferNotification() {
+    return _invokeBool('cancelTransferNotification');
+  }
+
+  Future<bool> minimizeToTray() => _invokeBool('minimizeToTray');
+
+  Future<bool> exitApp() => _invokeBool('exitApp');
+
+  Future<bool> openFile(String path) {
+    return _invokeBool('openFile', {'path': path});
   }
 
   Future<bool> showLaptopMediaNotification(MediaState media) {

@@ -22,6 +22,15 @@ enum DeviceRole {
   }
 }
 
+enum ConnectivityMode {
+  wifi,
+  net;
+
+  String get label =>
+      name == ConnectivityMode.wifi.name ? 'WiFi (Local)' : 'Internet (Cloud)';
+  String get key => name;
+}
+
 DeviceRole detectDeviceRole() {
   return switch (defaultTargetPlatform) {
     TargetPlatform.android || TargetPlatform.iOS => DeviceRole.phone,
@@ -168,6 +177,10 @@ class RemoteDevice {
     this.notificationAccessEnabled,
     this.remoteUnlockReady = false,
     this.media,
+    this.localIp,
+    this.connectivityMode = ConnectivityMode.wifi,
+    this.clipboard,
+    this.clipboardSync = false,
   });
 
   factory RemoteDevice.fromDoc(String id, Map<String, Object?> data) {
@@ -203,9 +216,16 @@ class RemoteDevice {
           ? data['notificationAccessEnabled'] as bool
           : null,
       remoteUnlockReady: data['remoteUnlockReady'] == true,
+      localIp: (data['localIp'] ?? '').toString(),
+      connectivityMode: ConnectivityMode.values.firstWhere(
+        (m) => m.key == data['connectivityMode'],
+        orElse: () => ConnectivityMode.wifi,
+      ),
       media: mediaValue is Map
           ? MediaState.fromMap(mediaValue.cast<String, Object?>())
           : null,
+      clipboard: (data['clipboard'] as String?),
+      clipboardSync: data['clipboardSync'] == true,
     );
   }
 
@@ -223,7 +243,11 @@ class RemoteDevice {
   final bool? canPostNotifications;
   final bool? notificationAccessEnabled;
   final bool remoteUnlockReady;
+  final String? localIp;
+  final ConnectivityMode connectivityMode;
   final MediaState? media;
+  final String? clipboard;
+  final bool clipboardSync;
 }
 
 class ActivityEvent {
