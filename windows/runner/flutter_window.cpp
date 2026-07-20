@@ -1,9 +1,23 @@
 #include "flutter_window.h"
 
 #include <optional>
+#include <string>
+#include <vector>
 
 #include "connector_platform_channel.h"
 #include "flutter/generated_plugin_registrant.h"
+
+namespace {
+
+std::string WideToUtf8(const std::wstring& value) {
+    if (value.empty()) return "";
+    const int size = WideCharToMultiByte(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), nullptr, 0, nullptr, nullptr);
+    std::string result(size, 0);
+    WideCharToMultiByte(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), result.data(), size, nullptr, nullptr);
+    return result;
+}
+
+} // namespace
 
 FlutterWindow::FlutterWindow(const flutter::DartProject& project)
     : project_(project) {}
@@ -65,6 +79,28 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
   }
 
   switch (message) {
+    case WM_COPYDATA: {
+      COPYDATASTRUCT* cds = reinterpret_cast<COPYDATASTRUCT*>(lparam);
+      if (cds && cds->dwData == 0 && cds->lpData && cds->cbData > 0) {
+        const wchar_t* raw = static_cast<const wchar_t*>(cds->lpData);
+        std::wstring data(raw, (cds->cbData / sizeof(wchar_t)) - 1);
+        std::vector<std::string> paths;
+        size_t pos = 0;
+        while (pos < data.size()) {
+          size_t end = data.find(L'\n', pos);
+          std::wstring part = data.substr(pos, end - pos);
+          if (!part.empty()) {
+            paths.push_back(WideToUtf8(part));
+          }
+          if (end == std::wstring::npos) break;
+          pos = end + 1;
+        }
+        if (!paths.empty()) {
+          HandleIncomingFiles(paths);
+        }
+      }
+      return 0;
+    }
     case WM_CLOSE:
       ShowWindow(hwnd, SW_HIDE);
       return 0;

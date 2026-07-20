@@ -10,6 +10,8 @@ class ConnectorPlatformBridge {
       StreamController<Map<String, Object?>>.broadcast();
   final StreamController<Map<String, Object?>> _laptopMediaActions =
       StreamController<Map<String, Object?>>.broadcast();
+  final StreamController<List<String>> _incomingShares =
+      StreamController<List<String>>.broadcast();
 
   ConnectorPlatformBridge() {
     _channel.setMethodCallHandler((call) async {
@@ -27,6 +29,19 @@ class ConnectorPlatformBridge {
           _laptopMediaActions.add(arguments.cast<String, Object?>());
         }
       }
+      if (call.method == 'incomingShare') {
+        final arguments = call.arguments;
+        if (arguments is Map) {
+          final path = arguments['path'] as String?;
+          if (path != null) {
+            _incomingShares.add([path]);
+          }
+          final paths = arguments['paths'] as List<dynamic>?;
+          if (paths != null) {
+            _incomingShares.add(paths.cast<String>());
+          }
+        }
+      }
     });
   }
 
@@ -35,6 +50,8 @@ class ConnectorPlatformBridge {
 
   Stream<Map<String, Object?>> get laptopMediaActions =>
       _laptopMediaActions.stream;
+
+  Stream<List<String>> get incomingShares => _incomingShares.stream;
 
   Future<bool> mediaPlayPause() => _invokeBool('mediaPlayPause');
 
@@ -152,6 +169,23 @@ class ConnectorPlatformBridge {
   Future<bool> cancelTransferNotification() {
     return _invokeBool('cancelTransferNotification');
   }
+
+  Future<bool> startForegroundService() {
+    return _invokeBool('startForegroundService');
+  }
+
+  Future<bool> updateForegroundStatus(String title, String text) {
+    return _invokeBool('updateForegroundStatus', {
+      'title': title,
+      'text': text,
+    });
+  }
+
+  Future<bool> showDisconnectedNotification() {
+    return _invokeBool('showDisconnectedNotification');
+  }
+
+  Future<bool> registerSendTo() => _invokeBool('registerSendTo');
 
   Future<bool> minimizeToTray() => _invokeBool('minimizeToTray');
 

@@ -35,6 +35,7 @@ class MainActivity : FlutterActivity() {
     private var previousAlarmVolume: Int? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var laptopMediaSession: MediaSession? = null
+    private var lastLaptopMediaState: LaptopMediaState? = null
     private var pendingRemoteUnlockAuthResult: MethodChannel.Result? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -105,8 +106,81 @@ class MainActivity : FlutterActivity() {
                 "cancelTransferNotification" -> {
                     result.success(cancelTransferNotification())
                 }
+                "startForegroundService" -> {
+                    val intent = Intent(this, ConnectorForegroundService::class.java)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        startForegroundService(intent)
+                    } else {
+                        startService(intent)
+                    }
+                    result.success(true)
+                }
+                "updateForegroundStatus" -> {
+                    val title = call.argument<String>("title") ?: "Connector"
+                    val text = call.argument<String>("text") ?: ""
+                    ConnectorForegroundService.updateStatus(this, title, text)
+                    result.success(true)
+                }
+                "showDisconnectedNotification" -> {
+                    showDisconnectedNotification()
+                    result.success(true)
+                }
                 else -> result.notImplemented()
             }
+        }
+        handleShareIntent(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleShareIntent(intent)
+    }
+
+    private fun handleShareIntent(intent: Intent) {
+        val paths = mutableListOf<String>()
+        when (intent.action) {
+            Intent.ACTION_SEND -> {
+                val uri = intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
+                if (uri != null) {
+                    val path = copyShareToCache(uri)
+                    if (path != null) paths.add(path)
+                }
+            }
+            Intent.ACTION_SEND_MULTIPLE -> {
+                val uris = intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM)
+                if (uris != null) {
+                    paths.addAll(uris.mapNotNull { copyShareToCache(it) })
+                }
+            }
+        }
+        if (paths.isEmpty()) return
+
+        if (paths.size == 1) {
+            methodChannel?.invokeMethod("incomingShare", mapOf("path" to paths[0]))
+        } else {
+            methodChannel?.invokeMethod("incomingShare", mapOf("paths" to paths))
+        }
+    }
+
+    private fun copyShareToCache(uri: Uri): String? {
+        return try {
+            val fileName = getFileName(uri) ?: "shared_${System.currentTimeMillis()}"
+            val cacheFile = java.io.File(cacheDir, "shares/$fileName")
+            cacheFile.parentFile?.mkdirs()
+            contentResolver.openInputStream(uri)?.use { input ->
+                cacheFile.outputStream().use { output ->
+                    input.copyTo(output)
+                }
+            }
+            cacheFile.absolutePath
+        } catch (_: Exception) { null }
+    }
+
+    private fun getFileName(uri: Uri): String? {
+        val cursor = contentResolver.query(uri, null, null, null, null)
+        return cursor?.use {
+            val nameIndex = it.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+            if (nameIndex >= 0 && it.moveToFirst()) it.getString(nameIndex) else null
         }
     }
 
@@ -277,8 +351,12 @@ class MainActivity : FlutterActivity() {
             manager.createNotificationChannel(channel)
         }
 
-        val state = LaptopMediaState.fromMap(media)
+        val incomingState = LaptopMediaState.fromMap(media)
+        val previousState = lastLaptopMediaState
+        val state = incomingState.smoothedAgainst(previousState)
+
         updateLaptopMediaSession(state)
+        lastLaptopMediaState = state
         manager.notify(LAPTOP_MEDIA_NOTIFICATION_ID, buildLaptopMediaNotification(state))
         return true
     }
@@ -287,6 +365,7 @@ class MainActivity : FlutterActivity() {
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         manager.cancel(LAPTOP_MEDIA_NOTIFICATION_ID)
         laptopMediaSession?.isActive = false
+        lastLaptopMediaState = null
         return true
     }
 
@@ -315,7 +394,8 @@ class MainActivity : FlutterActivity() {
             .setContentText(fileName)
             .setSmallIcon(android.R.drawable.stat_sys_download)
             .setProgress(max, current, false)
-            .setOngoing(progress < 1.0)
+            .setOngoing(progress > 0.0 && progress < 1.0)
+            .setOnlyAlertOnce(true)
         manager.notify(FILE_TRANSFER_NOTIFICATION_ID, builder.build())
         return true
     }
@@ -324,6 +404,35 @@ class MainActivity : FlutterActivity() {
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         manager.cancel(FILE_TRANSFER_NOTIFICATION_ID)
         return true
+    }
+
+    private fun showDisconnectedNotification() {
+        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                DISCONNECTED_CHANNEL_ID,
+                "Connection status",
+                NotificationManager.IMPORTANCE_DEFAULT
+            )
+            manager.createNotificationChannel(channel)
+        }
+        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Notification.Builder(this, DISCONNECTED_CHANNEL_ID)
+        } else {
+            @Suppress("DEPRECATION")
+            Notification.Builder(this)
+        }
+        val notification = builder
+            .setContentTitle("Your device disconnected")
+            .setContentText("Looking for connections...")
+            .setSmallIcon(android.R.drawable.ic_menu_info_details)
+            .setAutoCancel(true)
+            .build()
+        manager.notify(DISCONNECTED_NOTIFICATION_ID, notification)
+        // Auto-cancel after 5 seconds
+        android.os.Handler(mainLooper).postDelayed({
+            manager.cancel(DISCONNECTED_NOTIFICATION_ID)
+        }, 5000)
     }
 
     private fun buildLaptopMediaNotification(state: LaptopMediaState): Notification {
@@ -359,11 +468,6 @@ class MainActivity : FlutterActivity() {
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setShowWhen(false)
-            .setProgress(
-                state.durationMs.coerceAtLeast(0).toInt(),
-                state.positionMs.coerceAtLeast(0).toInt(),
-                state.durationMs <= 0
-            )
             .setStyle(
                 Notification.MediaStyle()
                     .setMediaSession(laptopMediaSession?.sessionToken)
@@ -431,7 +535,7 @@ class MainActivity : FlutterActivity() {
             )
             .setState(
                 if (state.isPlaying) PlaybackState.STATE_PLAYING else PlaybackState.STATE_PAUSED,
-                state.positionMs,
+                state.currentPositionMs(),
                 if (state.isPlaying) 1.0f else 0.0f,
                 SystemClock.elapsedRealtime()
             )
@@ -607,8 +711,11 @@ class MainActivity : FlutterActivity() {
         private const val LAPTOP_MEDIA_NOTIFICATION_ID = 1210
         private const val TRANSFER_CHANNEL_ID = "connector_file_transfer"
         private const val FILE_TRANSFER_NOTIFICATION_ID = 1212
+        private const val DISCONNECTED_CHANNEL_ID = "connector_disconnected"
+        private const val DISCONNECTED_NOTIFICATION_ID = 1213
         private const val BIOMETRIC_STRONG = 0x000F
         private const val DEVICE_CREDENTIAL = 0x8000
+        private const val MEDIA_SMOOTHING_WINDOW_MS = 5000L
         private var methodChannel: MethodChannel? = null
 
         fun sendPhoneNotification(data: Map<String, Any>) {
@@ -627,8 +734,49 @@ class MainActivity : FlutterActivity() {
         val sourceApp: String,
         val isPlaying: Boolean,
         val positionMs: Long,
-        val durationMs: Long
+        val durationMs: Long,
+        val updatedAtMs: Long
     ) {
+        fun currentPositionMs(): Long {
+            val ageMs = if (isPlaying && updatedAtMs > 0) {
+                (System.currentTimeMillis() - updatedAtMs).coerceAtLeast(0L)
+            } else {
+                0L
+            }
+            val max = durationMs.coerceAtLeast(0L)
+            return (positionMs.coerceAtLeast(0L) + ageMs).coerceIn(0L, max)
+        }
+
+        private fun isSameTrackAs(other: LaptopMediaState): Boolean {
+            return title == other.title &&
+                artist == other.artist &&
+                album == other.album &&
+                sourceApp == other.sourceApp &&
+                kotlin.math.abs(durationMs - other.durationMs) <= 1000L
+        }
+
+        fun smoothedAgainst(previous: LaptopMediaState?): LaptopMediaState {
+            if (previous == null || !isSameTrackAs(previous)) {
+                return this
+            }
+            if (!isPlaying || !previous.isPlaying) {
+                return this
+            }
+
+            val localPosition = previous.currentPositionMs()
+            val incomingPosition = currentPositionMs()
+            val correctionMs = kotlin.math.abs(incomingPosition - localPosition)
+
+            return if (correctionMs <= MEDIA_SMOOTHING_WINDOW_MS) {
+                copy(
+                    positionMs = localPosition,
+                    updatedAtMs = System.currentTimeMillis()
+                )
+            } else {
+                this
+            }
+        }
+
         companion object {
             fun fromMap(data: Map<*, *>): LaptopMediaState {
                 return LaptopMediaState(
@@ -638,10 +786,10 @@ class MainActivity : FlutterActivity() {
                     sourceApp = data["sourceApp"]?.toString().orEmpty(),
                     isPlaying = data["isPlaying"] == true,
                     positionMs = (data["positionMs"] as? Number)?.toLong() ?: 0L,
-                    durationMs = (data["durationMs"] as? Number)?.toLong() ?: 0L
+                    durationMs = (data["durationMs"] as? Number)?.toLong() ?: 0L,
+                    updatedAtMs = (data["updatedAtMs"] as? Number)?.toLong() ?: 0L
                 )
             }
         }
     }
 }
-

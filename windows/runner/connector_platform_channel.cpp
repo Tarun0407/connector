@@ -3,6 +3,7 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <endpointvolume.h>
 #include <mmdeviceapi.h>
 #include <iostream>
@@ -53,6 +54,10 @@ constexpr UINT WM_APP_TRAY = WM_APP + 1;
 
 HWND g_main_hwnd = nullptr;
 bool g_trayIconCreated = false;
+
+void RegisterSendTo();
+void RegisterContextMenu();
+void CheckIncomingFiles();
 
 namespace {
 
@@ -322,6 +327,18 @@ int64_t TimeSpanToMs(winrt::Windows::Foundation::TimeSpan value) {
     return std::chrono::duration_cast<std::chrono::milliseconds>(value).count();
 }
 
+int64_t ClampTimelineMs(int64_t value, int64_t maxValue) {
+    return std::clamp<int64_t>(value, 0, std::max<int64_t>(0, maxValue));
+}
+
+int64_t TimelineAgeMs(winrt::Windows::Foundation::DateTime lastUpdatedTime) {
+    const auto now = winrt::clock::now();
+    if (lastUpdatedTime > now) return 0;
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        now - lastUpdatedTime
+    ).count();
+}
+
 EncodableMap ReadMediaStatusOnWorker() {
     EncodableMap status;
     try {
@@ -336,18 +353,26 @@ EncodableMap ReadMediaStatusOnWorker() {
         const int64_t end_ms = TimeSpanToMs(timeline.EndTime());
         const int64_t duration_ms = std::max<int64_t>(0, end_ms - start_ms);
         const bool is_playing = playback_info.PlaybackStatus() == media_control::GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing;
+        const int64_t timeline_age_ms = is_playing ? TimelineAgeMs(timeline.LastUpdatedTime()) : 0;
+        const int64_t position_ms = ClampTimelineMs(
+            TimeSpanToMs(timeline.Position()) - start_ms + timeline_age_ms,
+            duration_ms
+        );
         status[EncodableValue("title")] = EncodableValue(HStringToUtf8(media_properties.Title()));
         status[EncodableValue("artist")] = EncodableValue(HStringToUtf8(media_properties.Artist()));
         status[EncodableValue("album")] = EncodableValue(HStringToUtf8(media_properties.AlbumTitle()));
+        status[EncodableValue("sourceApp")] = EncodableValue(HStringToUtf8(session.SourceAppUserModelId()));
         status[EncodableValue("isPlaying")] = EncodableValue(is_playing);
-        status[EncodableValue("positionMs")] = EncodableValue(TimeSpanToMs(timeline.Position()) - start_ms);
+        status[EncodableValue("positionMs")] = EncodableValue(position_ms);
         status[EncodableValue("durationMs")] = EncodableValue(duration_ms);
     } catch (...) {}
     return status;
 }
 
 EncodableMap ReadMediaStatus() {
-    return std::async(std::launch::async, []() { return ReadMediaStatusOnWorker(); }).get();
+    return std::async(std::launch::async, []() {
+        return ReadMediaStatusOnWorker();
+    }).get();
 }
 
 std::wstring CurrentExecutablePath() {
@@ -598,6 +623,12 @@ void HandleMethodCall(
         result->Success(EncodableValue(true));
         return;
     }
+    if (method == "registerSendTo") {
+        RegisterSendTo();
+        RegisterContextMenu();
+        result->Success(EncodableValue(true));
+        return;
+    }
     if (method == "openFile") {
         std::string path = ReadStringArgument(call.arguments(), "path", "");
         if (!path.empty()) {
@@ -617,15 +648,111 @@ void SetMainWindowHandle(HWND hwnd) {
     CreateSystemTrayIcon();
 }
 
+static std::unique_ptr<MethodChannel<EncodableValue>> g_channel;
+
+void CheckIncomingFiles() {
+    if (!g_channel) return;
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!argv) return;
+    std::vector<std::string> filePaths;
+    for (int i = 1; i < argc; i++) {
+        std::wstring arg(argv[i]);
+        // Check if the argument looks like a file path (exists on disk)
+        if (GetFileAttributesW(arg.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            filePaths.push_back(WideToUtf8(arg));
+        }
+    }
+    LocalFree(argv);
+    if (filePaths.empty()) return;
+
+    EncodableMap args;
+    if (filePaths.size() == 1) {
+        args[EncodableValue("path")] = EncodableValue(filePaths[0]);
+    } else {
+        EncodableList pathsList;
+        for (const auto& p : filePaths) pathsList.push_back(EncodableValue(p));
+        args[EncodableValue("paths")] = EncodableValue(pathsList);
+    }
+    g_channel->InvokeMethod("incomingShare", std::make_unique<EncodableValue>(args));
+}
+
+void RegisterSendTo() {
+    wchar_t path[MAX_PATH];
+    GetModuleFileNameW(nullptr, path, MAX_PATH);
+    char exePathA[MAX_PATH * 2];
+    WideCharToMultiByte(CP_ACP, 0, path, -1, exePathA, sizeof(exePathA), nullptr, nullptr);
+
+    wchar_t sendTo[MAX_PATH];
+    SHGetFolderPathW(nullptr, CSIDL_SENDTO, nullptr, 0, sendTo);
+    char sendToA[MAX_PATH * 2];
+    WideCharToMultiByte(CP_ACP, 0, sendTo, -1, sendToA, sizeof(sendToA), nullptr, nullptr);
+
+    std::string linkPath = std::string(sendToA) + "\\Connector.bat";
+    std::string batContent = std::string("@echo off\r\nstart \"\" \"") + exePathA + "\" %*\r\n";
+
+    HANDLE hFile = CreateFileA(linkPath.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile != INVALID_HANDLE_VALUE) {
+        DWORD written;
+        WriteFile(hFile, batContent.c_str(), static_cast<DWORD>(batContent.size()), &written, nullptr);
+        CloseHandle(hFile);
+    }
+}
+
+void RegisterContextMenu() {
+    wchar_t path[MAX_PATH];
+    GetModuleFileNameW(nullptr, path, MAX_PATH);
+    std::wstring exePath = L"\"" + std::wstring(path) + L"\" \"%1\"";
+
+    HKEY hKey;
+    // Register under HKCU\Software\Classes\*\shell\Connector
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Classes\\*\\shell\\Connector",
+                        0, nullptr, 0, KEY_WRITE, nullptr, &hKey, nullptr) == ERROR_SUCCESS) {
+        std::wstring displayName = L"Share with Connector";
+        RegSetValueExW(hKey, nullptr, 0, REG_SZ,
+            reinterpret_cast<const BYTE*>(displayName.c_str()),
+            static_cast<DWORD>((displayName.size() + 1) * sizeof(wchar_t)));
+        RegSetValueExW(hKey, L"Icon", 0, REG_SZ,
+            reinterpret_cast<const BYTE*>(path),
+            static_cast<DWORD>((wcslen(path) + 1) * sizeof(wchar_t)));
+        RegCloseKey(hKey);
+    }
+
+    // Set the command
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Classes\\*\\shell\\Connector\\command",
+                        0, nullptr, 0, KEY_WRITE, nullptr, &hKey, nullptr) == ERROR_SUCCESS) {
+        RegSetValueExW(hKey, nullptr, 0, REG_SZ,
+            reinterpret_cast<const BYTE*>(exePath.c_str()),
+            static_cast<DWORD>((exePath.size() + 1) * sizeof(wchar_t)));
+        RegCloseKey(hKey);
+    }
+}
+
 void RegisterConnectorPlatformChannel(flutter::FlutterEngine* engine) {
-    static std::unique_ptr<MethodChannel<EncodableValue>> channel;
     static bool local_server_started = false;
     if (!local_server_started) {
         StartLocalServer();
         local_server_started = true;
     }
 
-    channel = std::make_unique<MethodChannel<EncodableValue>>(
+    g_channel = std::make_unique<MethodChannel<EncodableValue>>(
         engine->messenger(), kChannelName, &StandardMethodCodec::GetInstance());
-    channel->SetMethodCallHandler(HandleMethodCall);
+    g_channel->SetMethodCallHandler(HandleMethodCall);
+
+    // Check for incoming file shares
+    CheckIncomingFiles();
+}
+
+void HandleIncomingFiles(const std::vector<std::string>& filePaths) {
+    if (filePaths.empty() || !g_channel) return;
+
+    EncodableMap args;
+    if (filePaths.size() == 1) {
+        args[EncodableValue("path")] = EncodableValue(filePaths[0]);
+    } else {
+        EncodableList pathsList;
+        for (const auto& p : filePaths) pathsList.push_back(EncodableValue(p));
+        args[EncodableValue("paths")] = EncodableValue(pathsList);
+    }
+    g_channel->InvokeMethod("incomingShare", std::make_unique<EncodableValue>(args));
 }

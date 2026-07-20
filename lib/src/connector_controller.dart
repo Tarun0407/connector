@@ -24,7 +24,7 @@ class ConnectorController extends ChangeNotifier {
       role = detectDeviceRole();
 
   static const Duration _idleDesktopPollInterval = Duration(seconds: 20);
-  static const Duration _activeMediaPollInterval = Duration(minutes: 1);
+  static const Duration _activeMediaPollInterval = Duration(seconds: 5);
 
   final ConnectorPlatformBridge platform;
   final Random? _random;
@@ -48,6 +48,7 @@ class ConnectorController extends ChangeNotifier {
   List<WindowEntry> windows = const [];
   List<String> receivedFiles = const [];
   List<String> phoneReceivedFiles = const [];
+  List<String> pendingShares = const [];
   double? uploadProgress;
   int uploadCurrent = 0;
   int uploadTotal = 0;
@@ -60,6 +61,7 @@ class ConnectorController extends ChangeNotifier {
   bool notificationAccessEnabled = false;
   bool clipboardSyncEnabled = false;
   bool _probingWifi = false;
+  DateTime? _lastNotificationUpdate;
 
   SharedPreferences? _preferences;
   StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _devicesSub;
@@ -72,6 +74,9 @@ class ConnectorController extends ChangeNotifier {
   Timer? _desktopPollTimer;
   Timer? _presenceCheckTimer;
   Timer? _clipboardPollTimer;
+  Future<void> _phoneFileSendQueue = Future<void>.value();
+
+  StreamSubscription<List<String>>? _incomingSharesSub;
   String? _lastLocalClipboard;
   String? _lastRemoteClipboard;
   final Set<String> _handledCommands = <String>{};
@@ -112,6 +117,11 @@ class ConnectorController extends ChangeNotifier {
         generatePairingCode(random: _random);
     await _preferences!.setString('connector.roomCode', roomCode!);
 
+    receivedFiles =
+        _preferences!.getStringList('connector.receivedFiles') ?? [];
+    phoneReceivedFiles =
+        _preferences!.getStringList('connector.phoneReceivedFiles') ?? [];
+
     try {
       if (Firebase.apps.isEmpty) {
         await Firebase.initializeApp(
@@ -139,7 +149,20 @@ class ConnectorController extends ChangeNotifier {
     }
 
     await refreshAutoStart();
+    if (Platform.isWindows) {
+      unawaited(platform.registerSendTo());
+    }
+    if (role == DeviceRole.phone) {
+      unawaited(platform.startForegroundService());
+      unawaited(_updateConnectionNotification());
+    }
     _listenForLocalPhoneNotifications();
+
+    _incomingSharesSub?.cancel();
+    _incomingSharesSub = platform.incomingShares.listen((paths) {
+      pendingShares = [...paths, ...pendingShares.take(10)];
+      _safeNotify();
+    });
 
     isBooting = false;
     _safeNotify();
@@ -263,10 +286,9 @@ class ConnectorController extends ChangeNotifier {
         final current = data?.text;
         if (current != null && current != _lastLocalClipboard) {
           _lastLocalClipboard = current;
-          await _updatePresence(extra: {
-            'clipboard': current,
-            'clipboardSync': true,
-          });
+          await _updatePresence(
+            extra: {'clipboard': current, 'clipboardSync': true},
+          );
         }
       } catch (_) {}
     });
@@ -278,7 +300,9 @@ class ConnectorController extends ChangeNotifier {
   }
 
   void _handleRemoteClipboard(String content) {
-    if (content == _lastRemoteClipboard || content == _lastLocalClipboard) return;
+    if (content == _lastRemoteClipboard || content == _lastLocalClipboard) {
+      return;
+    }
     _lastRemoteClipboard = content;
     _lastLocalClipboard = content;
     unawaited(Clipboard.setData(ClipboardData(text: content)));
@@ -302,34 +326,57 @@ class ConnectorController extends ChangeNotifier {
     if (isWifiReachable && laptopLocalIp != null) {
       uploadProgress = null;
       _safeNotify();
-      unawaited(platform.showTransferNotification(
+      _updateTransferNotification(
         title: 'Sending via Local WiFi',
         fileName: file.path.split(Platform.pathSeparator).last,
         progress: 0,
-      ));
-      final success = await _localClient.sendFile(laptopLocalIp!, file);
-      unawaited(platform.cancelTransferNotification());
-      if (success) {
-        statusMessage = 'File sent via Local WiFi!';
-        unawaited(_publishEvent(
-          type: 'file.sent.local',
-          title: 'File sent via Local WiFi',
-          detail: file.path.split(Platform.pathSeparator).last,
-        ));
-        final fileName = file.path.split(Platform.pathSeparator).last;
-        unawaited(sendCommand(
-          DeviceRole.laptop,
-          'laptop.localFileReceived',
-          payload: {'fileName': fileName},
-        ));
-        _safeNotify();
-        return true;
+      );
+      // Try local WiFi with retry
+      for (int attempt = 0; attempt < 2; attempt++) {
+        final success = await _localClient.sendFile(laptopLocalIp!, file);
+        if (success) {
+          unawaited(platform.cancelTransferNotification());
+          unawaited(
+            platform.showSystemNotification(
+              title: 'Connector',
+              body: 'File sent via Local WiFi!',
+            ),
+          );
+          statusMessage = 'File sent via Local WiFi!';
+          unawaited(
+            _publishEvent(
+              type: 'file.sent.local',
+              title: 'File sent via Local WiFi',
+              detail: file.path.split(Platform.pathSeparator).last,
+            ),
+          );
+          final fileName = file.path.split(Platform.pathSeparator).last;
+          unawaited(
+            sendCommand(
+              DeviceRole.laptop,
+              'laptop.localFileReceived',
+              payload: {'fileName': fileName},
+            ),
+          );
+          _safeNotify();
+          return true;
+        }
+        if (attempt == 0) {
+          _updateTransferNotification(
+            title: 'Waiting for Local WiFi...',
+            fileName: file.path.split(Platform.pathSeparator).last,
+            progress: 0,
+          );
+          await Future<void>.delayed(const Duration(seconds: 3));
+        }
       }
+      // Local WiFi failed after retry — fall through to cloud; keep notification
     }
 
     if (sizeInMb <= maxCloudUploadSize) {
       return await _uploadFileToCloud(file);
     } else {
+      unawaited(platform.cancelTransferNotification());
       statusMessage = 'File too large for Cloud! Connect to WiFi.';
       _safeNotify();
       return false;
@@ -338,9 +385,18 @@ class ConnectorController extends ChangeNotifier {
 
   Future<bool> _uploadFileToCloud(File file) async {
     try {
-      if (roomCode == null) return false;
+      if (roomCode == null) {
+        unawaited(platform.cancelTransferNotification());
+        return false;
+      }
 
       final fileName = file.path.split(Platform.pathSeparator).last;
+      _updateTransferNotification(
+        title: 'Uploading to laptop',
+        fileName: fileName,
+        progress: 0,
+      );
+
       final ref = FirebaseStorage.instance.ref().child(
         'uploads/$roomCode/$deviceId/$fileName',
       );
@@ -354,18 +410,25 @@ class ConnectorController extends ChangeNotifier {
       task.snapshotEvents.listen((snap) {
         if (snap.totalBytes > 0) {
           uploadProgress = snap.bytesTransferred / snap.totalBytes;
-          statusMessage = 'Uploading $fileName ${(uploadProgress! * 100).toStringAsFixed(0)}%';
-          unawaited(platform.showTransferNotification(
+          statusMessage =
+              'Uploading $fileName ${(uploadProgress! * 100).toStringAsFixed(0)}%';
+          _updateTransferNotification(
             title: 'Uploading to laptop',
             fileName: fileName,
             progress: uploadProgress!,
-          ));
+          );
           _safeNotify();
         }
       });
 
       await task;
       unawaited(platform.cancelTransferNotification());
+      unawaited(
+        platform.showSystemNotification(
+          title: 'Connector',
+          body: 'File uploaded to Cloud!',
+        ),
+      );
       final url = await ref.getDownloadURL();
 
       uploadProgress = null;
@@ -380,6 +443,7 @@ class ConnectorController extends ChangeNotifier {
       _safeNotify();
       return true;
     } catch (e) {
+      unawaited(platform.cancelTransferNotification());
       uploadProgress = null;
       statusMessage = 'Cloud upload failed: $e';
       _safeNotify();
@@ -416,10 +480,31 @@ class ConnectorController extends ChangeNotifier {
 
       isWifiReachable = await _localClient.probeConnectivity(peerIp, peerPort);
       _safeNotify();
+      unawaited(_updateConnectionNotification());
     } finally {
       _probingWifi = false;
     }
   }
+
+  Future<void> _updateConnectionNotification() async {
+    if (role != DeviceRole.phone) return;
+    final peer = role == DeviceRole.phone ? primaryLaptop : primaryPhone;
+    if (peer != null && isDeviceOnline(peer)) {
+      final mode = isWifiReachable ? 'local WiFi' : 'Cloud';
+      await platform.updateForegroundStatus(
+        'Your device is connected',
+        'via $mode',
+      );
+    } else {
+      await platform.showDisconnectedNotification();
+      await platform.updateForegroundStatus(
+        'Connector is running',
+        'Looking for connections...',
+      );
+    }
+  }
+
+  bool _peerWasOnline = false;
 
   Future<void> sendLaptopCommand(
     String type, {
@@ -591,16 +676,21 @@ class ConnectorController extends ChangeNotifier {
           final file = File(_downloadsDir + Platform.pathSeparator + fileName);
           if (await file.exists()) {
             receivedFiles = [file.path, ...receivedFiles.take(19)];
+            unawaited(_persistReceivedFiles());
             statusMessage = 'Received file: $fileName';
-            unawaited(platform.showSystemNotification(
-              title: 'File received',
-              body: fileName,
-            ));
-            unawaited(_publishEvent(
-              type: 'file.received',
-              title: 'File received via Local WiFi',
-              detail: fileName,
-            ));
+            unawaited(
+              platform.showSystemNotification(
+                title: 'File received',
+                body: fileName,
+              ),
+            );
+            unawaited(
+              _publishEvent(
+                type: 'file.received',
+                title: 'File received via Local WiFi',
+                detail: fileName,
+              ),
+            );
           }
         }
         return;
@@ -635,10 +725,12 @@ class ConnectorController extends ChangeNotifier {
       if (role == DeviceRole.phone) {
         laptopLocalIp = peer?.localIp;
         final media = peer?.media;
-        if (peer == null || media == null || !isDeviceOnline(peer)) {
+        if (peer == null || !isDeviceOnline(peer)) {
           unawaited(platform.cancelLaptopMediaNotification());
+        } else if (media != null) {
+          unawaited(_pushLaptopMediaNotification(media));
         } else {
-          unawaited(platform.showLaptopMediaNotification(media));
+          unawaited(platform.cancelLaptopMediaNotification());
         }
       } else {
         phoneLocalIp = peer?.localIp;
@@ -655,6 +747,14 @@ class ConnectorController extends ChangeNotifier {
         if (peer != null && peer.clipboardSync && peer.clipboard != null) {
           _handleRemoteClipboard(peer.clipboard!);
         }
+      }
+
+      if (role == DeviceRole.phone) {
+        final peerOnline = peer != null && isDeviceOnline(peer);
+        if (!peerOnline && _peerWasOnline) {
+          unawaited(_updateConnectionNotification());
+        }
+        _peerWasOnline = peerOnline;
       }
 
       _safeNotify();
@@ -762,6 +862,14 @@ class ConnectorController extends ChangeNotifier {
           : const <String, Object?>{};
       unawaited(sendLaptopCommand(command, payload: payload));
     });
+  }
+
+  Future<void> _pushLaptopMediaNotification(MediaState media) async {
+    if (media.durationMs > 0) {
+      await platform.showLaptopMediaNotification(media);
+    } else {
+      await platform.cancelLaptopMediaNotification();
+    }
   }
 
   void _listenForCommands() {
@@ -1046,6 +1154,28 @@ class ConnectorController extends ChangeNotifier {
     };
   }
 
+  void _updateTransferNotification({
+    required String title,
+    required String fileName,
+    double progress = 0,
+    bool force = false,
+  }) {
+    final now = DateTime.now();
+    if (!force &&
+        _lastNotificationUpdate != null &&
+        now.difference(_lastNotificationUpdate!).inMilliseconds < 300) {
+      return;
+    }
+    _lastNotificationUpdate = now;
+    unawaited(
+      platform.showTransferNotification(
+        title: title,
+        fileName: fileName,
+        progress: progress,
+      ),
+    );
+  }
+
   Future<void> openReceivedFile(String fullPath) async {
     final file = File(fullPath);
     if (!await file.exists()) {
@@ -1064,12 +1194,14 @@ class ConnectorController extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     unawaited(_cancelRoomSubscriptions());
+    _incomingSharesSub?.cancel();
     super.dispose();
   }
 
   String get _downloadsDir {
     if (Platform.isWindows) {
-      final profile = Platform.environment['USERPROFILE'] ?? 'C:\\Users\\Public';
+      final profile =
+          Platform.environment['USERPROFILE'] ?? 'C:\\Users\\Public';
       return '$profile\\Downloads\\Connector';
     }
     final home = Platform.environment['HOME'] ?? '/tmp';
@@ -1084,11 +1216,11 @@ class ConnectorController extends ChangeNotifier {
       }
 
       final file = File('${directory.path}${Platform.pathSeparator}$fileName');
-      unawaited(platform.showTransferNotification(
+      _updateTransferNotification(
         title: 'Downloading from cloud',
         fileName: fileName,
         progress: 0,
-      ));
+      );
       final client = http.Client();
       try {
         final request = http.Request('GET', Uri.parse(url));
@@ -1104,17 +1236,18 @@ class ConnectorController extends ChangeNotifier {
             sink.add(chunk);
             received += chunk.length;
             if (total > 0) {
-              unawaited(platform.showTransferNotification(
+              _updateTransferNotification(
                 title: 'Downloading from cloud',
                 fileName: fileName,
                 progress: received / total,
-              ));
+              );
             }
           }
           await sink.flush();
           await sink.close();
           statusMessage = 'Received file: $fileName';
           receivedFiles = [file.path, ...receivedFiles.take(19)];
+          unawaited(_persistReceivedFiles());
           unawaited(platform.cancelTransferNotification());
           unawaited(
             platform.showSystemNotification(
@@ -1137,6 +1270,7 @@ class ConnectorController extends ChangeNotifier {
         client.close();
       }
     } catch (e) {
+      unawaited(platform.cancelTransferNotification());
       statusMessage = 'Download error: $e';
     }
     _safeNotify();
@@ -1144,11 +1278,7 @@ class ConnectorController extends ChangeNotifier {
 
   String get _phoneDownloadsDir {
     if (Platform.isAndroid) {
-      final dir = Directory('/storage/emulated/0/Download/Connector');
-      if (dir.existsSync()) return dir.path;
-      final fallback = Directory('${Platform.environment['HOME'] ?? '/tmp'}/Download/Connector');
-      if (fallback.existsSync()) return fallback.path;
-      return '/storage/emulated/0/Download/Connector';
+      return '/storage/emulated/0/Android/data/com.example.connector/files/Download/Connector';
     }
     return _downloadsDir;
   }
@@ -1157,11 +1287,12 @@ class ConnectorController extends ChangeNotifier {
     _stopPhoneFileServer();
     ServerSocket.bind(InternetAddress.anyIPv4, LocalNetworkClient.kPhonePort)
         .then((server) {
-      _phoneFileServer = server;
-      server.listen((socket) {
-        _handlePhoneFileClient(socket);
-      });
-    }).catchError((_) {});
+          _phoneFileServer = server;
+          server.listen((socket) {
+            _handlePhoneFileClient(socket);
+          });
+        })
+        .catchError((_) {});
   }
 
   void _stopPhoneFileServer() {
@@ -1169,17 +1300,18 @@ class ConnectorController extends ChangeNotifier {
     _phoneFileServer = null;
   }
 
-  void _handlePhoneFileClient(Socket socket) {
+  Future<void> _handlePhoneFileClient(Socket socket) async {
     final bb = BytesBuilder();
     String? fileName;
     int fileSize = 0;
     int headerEnd = -1;
     bool headerParsed = false;
+    bool completed = false;
     RandomAccessFile? sink;
     int written = 0;
 
-    socket.listen(
-      (data) {
+    try {
+      await for (final data in socket) {
         bb.add(data);
 
         if (!headerParsed) {
@@ -1194,18 +1326,15 @@ class ConnectorController extends ChangeNotifier {
               }
             }
           }
-          if (headerEnd < 0) return;
+          if (headerEnd < 0) continue;
 
           final ascii = String.fromCharCodes(buf);
           final lines = ascii.split('\n');
-          if (lines.length < 2 || lines[0].trim() != 'sendFile') {
-            socket.close();
-            return;
-          }
+          if (lines.length < 2 || lines[0].trim() != 'sendFile') return;
           final parts = lines[1].trim().split('|');
-          if (parts.length != 2) { socket.close(); return; }
+          if (parts.length != 2) return;
           final sz = int.tryParse(parts[1]) ?? -1;
-          if (sz <= 0) { socket.close(); return; }
+          if (sz <= 0) return;
 
           fileName = parts[0];
           fileSize = sz;
@@ -1213,71 +1342,181 @@ class ConnectorController extends ChangeNotifier {
 
           final dir = Directory(_phoneDownloadsDir);
           if (!dir.existsSync()) dir.createSync(recursive: true);
-          sink = File('${dir.path}${Platform.pathSeparator}$fileName')
-              .openSync(mode: FileMode.write);
+          sink = File(
+            '${dir.path}${Platform.pathSeparator}$fileName',
+          ).openSync(mode: FileMode.write);
+          _updateTransferNotification(
+            title: 'Receiving via Local WiFi',
+            fileName: fileName,
+            progress: 0,
+            force: true,
+          );
+          statusMessage = 'Receiving file: $fileName';
+          _safeNotify();
         }
 
         final buf = bb.toBytes();
-        if (headerEnd >= buf.length || sink == null) return;
+        if (headerEnd >= buf.length || sink == null) continue;
 
         final fileData = buf.sublist(headerEnd);
         final needed = fileSize - written;
-        final toWrite = fileData.length > needed ? fileData.sublist(0, needed) : fileData;
+        final toWrite = fileData.length > needed
+            ? fileData.sublist(0, needed)
+            : fileData;
         if (toWrite.isNotEmpty) {
-          sink!.writeFromSync(toWrite);
+          sink.writeFromSync(toWrite);
           written += toWrite.length;
+          if (fileName != null && fileSize > 0) {
+            _updateTransferNotification(
+              title: 'Receiving via Local WiFi',
+              fileName: fileName,
+              progress: written / fileSize,
+            );
+          }
         }
         bb.clear();
+        headerEnd = 0;
 
-        if (written >= fileSize) {
-          final fullPath = '$_phoneDownloadsDir${Platform.pathSeparator}$fileName';
-          sink!.closeSync();
-          socket.close();
+        if (written >= fileSize && fileName != null) {
+          final fullPath =
+              '$_phoneDownloadsDir${Platform.pathSeparator}$fileName';
+          sink.closeSync();
+          sink = null;
           phoneReceivedFiles = [fullPath, ...phoneReceivedFiles.take(19)];
+          unawaited(_persistReceivedFiles());
           statusMessage = 'Received file: $fileName';
-          unawaited(_publishEvent(
-            type: 'file.received',
-            title: 'File received from laptop',
-            detail: fileName!,
-          ));
+          completed = true;
+          unawaited(
+            _publishEvent(
+              type: 'file.received',
+              title: 'File received from laptop',
+              detail: fileName,
+            ),
+          );
+          unawaited(platform.cancelTransferNotification());
+          unawaited(
+            platform.showSystemNotification(
+              title: 'File received',
+              body: fileName,
+            ),
+          );
           _safeNotify();
+          try {
+            socket.write('ok\n');
+            await socket.flush();
+          } catch (_) {}
+          return;
         }
-      },
-      onDone: () {
-        sink?.closeSync();
+      }
+    } catch (_) {
+    } finally {
+      sink?.closeSync();
+      if (!completed && headerParsed && fileName != null) {
+        statusMessage = 'File receive failed: $fileName';
+        _updateTransferNotification(
+          title: 'File receive failed',
+          fileName: fileName,
+          progress: 0,
+          force: true,
+        );
+        unawaited(
+          platform.showSystemNotification(
+            title: 'File receive failed',
+            body: fileName,
+          ),
+        );
+        _safeNotify();
+      }
+      try {
         socket.close();
-      },
-      onError: (_) {
-        sink?.closeSync();
-        socket.close();
-      },
-      cancelOnError: false,
-    );
+      } catch (_) {}
+    }
   }
 
-  Future<bool> sendFileToPhone(File file) async {
+  Future<bool> sendFileToPhone(File file) {
+    final completer = Completer<bool>();
+    _phoneFileSendQueue = _phoneFileSendQueue.catchError((_) {}).then((
+      _,
+    ) async {
+      if (_disposed) {
+        completer.complete(false);
+        return;
+      }
+
+      try {
+        final success = await _sendFileToPhoneNow(file);
+        completer.complete(success);
+      } catch (_) {
+        if (!completer.isCompleted) {
+          completer.complete(false);
+        }
+      }
+    });
+    return completer.future;
+  }
+
+  Future<bool> _sendFileToPhoneNow(File file) async {
     final sizeInMb = (await file.length()) / (1024 * 1024);
+    final fileName = file.path.split(Platform.pathSeparator).last;
 
     if (isWifiReachable && phoneLocalIp != null) {
-      uploadProgress = null;
+      final totalBytes = await file.length();
+      uploadProgress = 0;
+      uploadCurrent = 0;
+      uploadTotal = totalBytes;
       _safeNotify();
-      unawaited(platform.showTransferNotification(
+      _updateTransferNotification(
         title: 'Sending via Local WiFi',
-        fileName: file.path.split(Platform.pathSeparator).last,
+        fileName: fileName,
         progress: 0,
-      ));
-      final success = await _localClient.sendFileToPhone(phoneLocalIp!, file);
-      unawaited(platform.cancelTransferNotification());
-      if (success) {
-        statusMessage = 'File sent to phone via Local WiFi!';
-        _safeNotify();
-        return true;
+      );
+      for (int attempt = 0; attempt < 2; attempt++) {
+        final success = await _localClient.sendFileToPhone(
+          phoneLocalIp!,
+          file,
+          onProgress: (sentBytes, totalBytes) {
+            uploadCurrent = sentBytes;
+            uploadTotal = totalBytes;
+            uploadProgress = totalBytes <= 0 ? null : sentBytes / totalBytes;
+            _updateTransferNotification(
+              title: 'Sending via Local WiFi',
+              fileName: fileName,
+              progress: uploadProgress ?? 0,
+            );
+            _safeNotify();
+          },
+        );
+        if (success) {
+          unawaited(platform.cancelTransferNotification());
+          unawaited(
+            platform.showSystemNotification(
+              title: 'Connector',
+              body: 'File sent to phone via Local WiFi!',
+            ),
+          );
+          uploadProgress = null;
+          uploadCurrent = 0;
+          uploadTotal = 0;
+          statusMessage = 'File sent to phone via Local WiFi!';
+          _safeNotify();
+          return true;
+        }
+        if (attempt == 0) {
+          _updateTransferNotification(
+            title: 'Waiting for Local WiFi...',
+            fileName: fileName,
+            progress: 0,
+          );
+          await Future<void>.delayed(const Duration(seconds: 3));
+        }
       }
+      // Local WiFi failed after retry — fall through to cloud; keep notification
     }
 
     if (sizeInMb <= maxCloudUploadSize) {
       return await _uploadFileToCloudPhone(file);
     } else {
+      unawaited(platform.cancelTransferNotification());
       statusMessage = 'File too large for Cloud! Connect to WiFi.';
       _safeNotify();
       return false;
@@ -1286,9 +1525,18 @@ class ConnectorController extends ChangeNotifier {
 
   Future<bool> _uploadFileToCloudPhone(File file) async {
     try {
-      if (roomCode == null) return false;
+      if (roomCode == null) {
+        unawaited(platform.cancelTransferNotification());
+        return false;
+      }
 
       final fileName = file.path.split(Platform.pathSeparator).last;
+      _updateTransferNotification(
+        title: 'Uploading to phone',
+        fileName: fileName,
+        progress: 0,
+      );
+
       final ref = FirebaseStorage.instance.ref().child(
         'uploads/$roomCode/$deviceId/$fileName',
       );
@@ -1302,18 +1550,25 @@ class ConnectorController extends ChangeNotifier {
       task.snapshotEvents.listen((snap) {
         if (snap.totalBytes > 0) {
           uploadProgress = snap.bytesTransferred / snap.totalBytes;
-          statusMessage = 'Uploading $fileName ${(uploadProgress! * 100).toStringAsFixed(0)}%';
-          unawaited(platform.showTransferNotification(
+          statusMessage =
+              'Uploading $fileName ${(uploadProgress! * 100).toStringAsFixed(0)}%';
+          _updateTransferNotification(
             title: 'Uploading to phone',
             fileName: fileName,
             progress: uploadProgress!,
-          ));
+          );
           _safeNotify();
         }
       });
 
       await task;
       unawaited(platform.cancelTransferNotification());
+      unawaited(
+        platform.showSystemNotification(
+          title: 'Connector',
+          body: 'File uploaded to Cloud!',
+        ),
+      );
       final url = await ref.getDownloadURL();
 
       uploadProgress = null;
@@ -1329,6 +1584,7 @@ class ConnectorController extends ChangeNotifier {
       _safeNotify();
       return true;
     } catch (e) {
+      unawaited(platform.cancelTransferNotification());
       uploadProgress = null;
       statusMessage = 'Cloud upload to phone failed: $e';
       _safeNotify();
@@ -1344,11 +1600,11 @@ class ConnectorController extends ChangeNotifier {
       }
 
       final file = File('${directory.path}${Platform.pathSeparator}$fileName');
-      unawaited(platform.showTransferNotification(
+      _updateTransferNotification(
         title: 'Downloading from cloud',
         fileName: fileName,
         progress: 0,
-      ));
+      );
       final client = http.Client();
       try {
         final request = http.Request('GET', Uri.parse(url));
@@ -1364,17 +1620,18 @@ class ConnectorController extends ChangeNotifier {
             sink.add(chunk);
             received += chunk.length;
             if (total > 0) {
-              unawaited(platform.showTransferNotification(
+              _updateTransferNotification(
                 title: 'Downloading from cloud',
                 fileName: fileName,
                 progress: received / total,
-              ));
+              );
             }
           }
           await sink.flush();
           await sink.close();
           statusMessage = 'Received file: $fileName';
           phoneReceivedFiles = [file.path, ...phoneReceivedFiles.take(19)];
+          unawaited(_persistReceivedFiles());
           unawaited(platform.cancelTransferNotification());
           unawaited(
             platform.showSystemNotification(
@@ -1397,8 +1654,17 @@ class ConnectorController extends ChangeNotifier {
         client.close();
       }
     } catch (e) {
+      unawaited(platform.cancelTransferNotification());
       statusMessage = 'Download error: $e';
     }
     _safeNotify();
+  }
+
+  Future<void> _persistReceivedFiles() async {
+    await _preferences?.setStringList('connector.receivedFiles', receivedFiles);
+    await _preferences?.setStringList(
+      'connector.phoneReceivedFiles',
+      phoneReceivedFiles,
+    );
   }
 }

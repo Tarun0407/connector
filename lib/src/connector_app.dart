@@ -64,6 +64,9 @@ class ConnectorHome extends StatefulWidget {
 class _ConnectorHomeState extends State<ConnectorHome> {
   late final TextEditingController _roomController;
   bool _editingPairing = false;
+  final List<String> _pendingSharePaths = <String>[];
+  Timer? _shareDialogTimer;
+  bool _shareDialogShowing = false;
 
   ConnectorController get controller => widget.controller;
   @override
@@ -71,14 +74,108 @@ class _ConnectorHomeState extends State<ConnectorHome> {
     super.initState();
     _roomController = TextEditingController();
     controller.addListener(_syncRoomCode);
+    controller.addListener(_onControllerChange);
     controller.start();
   }
 
   @override
   void dispose() {
     controller.removeListener(_syncRoomCode);
+    controller.removeListener(_onControllerChange);
+    _shareDialogTimer?.cancel();
     _roomController.dispose();
     super.dispose();
+  }
+
+  void _onControllerChange() {
+    if (controller.pendingShares.isEmpty) return;
+    _pendingSharePaths.addAll(controller.pendingShares);
+    controller.pendingShares = const [];
+    _shareDialogTimer?.cancel();
+    _shareDialogTimer = Timer(
+      const Duration(milliseconds: 450),
+      _flushShareDialog,
+    );
+  }
+
+  Future<void> _flushShareDialog() async {
+    if (_shareDialogShowing || _pendingSharePaths.isEmpty || !mounted) return;
+    final paths = _uniquePaths(_pendingSharePaths);
+    _pendingSharePaths.clear();
+    _shareDialogShowing = true;
+    await _showShareDialog(paths);
+    _shareDialogShowing = false;
+    if (_pendingSharePaths.isNotEmpty) {
+      _shareDialogTimer?.cancel();
+      _shareDialogTimer = Timer(
+        const Duration(milliseconds: 200),
+        _flushShareDialog,
+      );
+    }
+  }
+
+  List<String> _uniquePaths(List<String> paths) {
+    final seen = <String>{};
+    return [
+      for (final path in paths)
+        if (seen.add(path)) path,
+    ];
+  }
+
+  Future<void> _showShareDialog(List<String> paths) async {
+    final target = controller.role == DeviceRole.laptop ? 'phone' : 'laptop';
+    final targetLabel = target == 'phone' ? 'Phone' : 'Laptop';
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Send ${paths.length} file${paths.length > 1 ? 's' : ''}?'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: ListView.builder(
+            shrinkWrap: true,
+            itemCount: paths.length,
+            itemBuilder: (_, i) => ListTile(
+              dense: true,
+              leading: const Icon(Icons.insert_drive_file_rounded),
+              title: Text(paths[i].split('\\').last.split('/').last),
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () {
+              Navigator.of(ctx).pop();
+              unawaited(_sendPaths(paths, target));
+            },
+            child: Text('Send to $targetLabel'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _sendPaths(List<String> paths, String target) async {
+    var sent = 0;
+    for (final path in paths) {
+      final file = File(path);
+      final success = target == 'phone'
+          ? await controller.sendFileToPhone(file)
+          : await controller.sendFile(file);
+      if (success) sent++;
+    }
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          'Sent $sent of ${paths.length} file${paths.length == 1 ? '' : 's'}',
+        ),
+        backgroundColor: sent == paths.length ? Colors.green : Colors.orange,
+      ),
+    );
   }
 
   void _syncRoomCode() {
@@ -438,14 +535,19 @@ class _SettingsSheetState extends State<_SettingsSheet> {
                   builder: (context, child) {
                     return Card(
                       child: Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 10,
+                        ),
                         child: Row(
                           children: [
                             Icon(
                               c.isWifiReachable
                                   ? Icons.wifi_rounded
                                   : Icons.cloud_rounded,
-                              color: c.isWifiReachable ? Colors.green : Colors.grey,
+                              color: c.isWifiReachable
+                                  ? Colors.green
+                                  : Colors.grey,
                             ),
                             const SizedBox(width: 12),
                             Expanded(
@@ -456,13 +558,17 @@ class _SettingsSheetState extends State<_SettingsSheet> {
                                     c.isWifiReachable
                                         ? 'Connected via Local WiFi'
                                         : 'Connected via Cloud',
-                                    style: const TextStyle(fontWeight: FontWeight.w600),
+                                    style: const TextStyle(
+                                      fontWeight: FontWeight.w600,
+                                    ),
                                   ),
                                   Text(
                                     c.isWifiReachable
                                         ? 'File size: unlimited'
                                         : 'File size: ${c.maxCloudUploadSize}MB limit',
-                                    style: Theme.of(context).textTheme.bodySmall,
+                                    style: Theme.of(
+                                      context,
+                                    ).textTheme.bodySmall,
                                   ),
                                 ],
                               ),
@@ -494,7 +600,8 @@ class _SettingsSheetState extends State<_SettingsSheet> {
                           c.setMaxCloudUploadSize(size);
                         },
                         onEditingComplete: () {
-                          final size = int.tryParse(_limitController.text) ?? 100;
+                          final size =
+                              int.tryParse(_limitController.text) ?? 100;
                           c.setMaxCloudUploadSize(size);
                         },
                       ),
@@ -605,7 +712,9 @@ class _SettingsSheetState extends State<_SettingsSheet> {
                       context: context,
                       builder: (ctx) => AlertDialog(
                         title: const Text('Exit Connector?'),
-                        content: const Text('This will stop background services and close the app.'),
+                        content: const Text(
+                          'This will stop background services and close the app.',
+                        ),
                         actions: [
                           TextButton(
                             onPressed: () => Navigator.of(ctx).pop(false),
@@ -807,7 +916,11 @@ class _LaptopHome extends StatelessWidget {
                   itemBuilder: (context, index) {
                     final fileName = controller.receivedFiles[index];
                     final fullPath = fileName;
-                    final displayName = fullPath.split('\\').last.split('/').last;
+                    final displayName = fullPath
+                        .split('\\')
+                        .last
+                        .split('/')
+                        .last;
                     return ListTile(
                       dense: true,
                       contentPadding: EdgeInsets.zero,
@@ -914,10 +1027,11 @@ class _PhoneHomeState extends State<_PhoneHome> {
                 label: 'Send File',
                 onPressed: _pickAndSendFile,
               ),
-            _StatusPill(
-              icon: Icons.info_outline_rounded,
-              label: 'Limit: ${widget.controller.maxCloudUploadSize}MB',
-            ),
+            if (!widget.controller.isWifiReachable)
+              _StatusPill(
+                icon: Icons.info_outline_rounded,
+                label: 'Limit: ${widget.controller.maxCloudUploadSize}MB',
+              ),
           ],
         ),
       ),
@@ -937,7 +1051,11 @@ class _PhoneHomeState extends State<_PhoneHome> {
                     final fileName =
                         widget.controller.phoneReceivedFiles[index];
                     final fullPath = fileName;
-                    final displayName = fullPath.split('\\').last.split('/').last;
+                    final displayName = fullPath
+                        .split('\\')
+                        .last
+                        .split('/')
+                        .last;
                     return ListTile(
                       dense: true,
                       contentPadding: EdgeInsets.zero,
@@ -958,7 +1076,9 @@ class _PhoneHomeState extends State<_PhoneHome> {
       _Panel(
         title: 'Activity Log',
         icon: Icons.history_rounded,
-        child: _ActivityList(events: widget.controller.events),
+        child: _ActivityList(
+          events: widget.controller.events.take(20).toList(),
+        ),
       ),
       _Panel(
         title: 'Paired Devices',
@@ -1276,10 +1396,12 @@ class _Panel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Card(
+      clipBehavior: Clip.antiAlias,
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
           children: [
             Row(
               children: [
@@ -1299,7 +1421,7 @@ class _Panel extends StatelessWidget {
                 ),
               ],
             ),
-            const SizedBox(height: 14),
+            const SizedBox(height: 12),
             child,
           ],
         ),
@@ -1493,30 +1615,32 @@ class _ActivityList extends StatelessWidget {
       );
     }
 
-    return ConstrainedBox(
-      constraints: const BoxConstraints(maxHeight: 360),
-      child: ListView.separated(
-        shrinkWrap: true,
-        itemBuilder: (context, index) {
-          final event = events[index];
-          return ListTile(
-            dense: true,
-            contentPadding: EdgeInsets.zero,
-            leading: Icon(_eventIcon(event.type)),
-            title: Text(
-              event.title,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-            subtitle: Text(
-              _eventSubtitle(event),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-          );
-        },
-        separatorBuilder: (_, _) => const Divider(height: 1),
-        itemCount: events.length,
+    return ClipRect(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxHeight: 280),
+        child: ListView.separated(
+          shrinkWrap: true,
+          itemBuilder: (context, index) {
+            final event = events[index];
+            return ListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(_eventIcon(event.type)),
+              title: Text(
+                event.title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              subtitle: Text(
+                _eventSubtitle(event),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            );
+          },
+          separatorBuilder: (_, _) => const Divider(height: 1),
+          itemCount: events.length,
+        ),
       ),
     );
   }
@@ -1579,19 +1703,61 @@ class _EmptyState extends StatelessWidget {
 }
 
 Future<void> _pickAndSendFileToPhone(
-    BuildContext context, ConnectorController controller) async {
-  final result = await FilePicker.pickFiles();
-  if (result != null && result.files.single.path != null) {
-    final file = File(result.files.single.path!);
-    final success = await controller.sendFileToPhone(file);
-    if (!context.mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          success ? 'File sent to phone!' : 'Failed to send to phone',
+  BuildContext context,
+  ConnectorController controller,
+) async {
+  final result = await FilePicker.pickFiles(allowMultiple: true);
+  if (result == null) return;
+
+  final paths = result.files
+      .map((file) => file.path)
+      .whereType<String>()
+      .toList();
+  if (paths.isEmpty || !context.mounted) return;
+
+  final confirmed = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: Text('Send ${paths.length} file${paths.length > 1 ? 's' : ''}?'),
+      content: SizedBox(
+        width: double.maxFinite,
+        child: ListView.builder(
+          shrinkWrap: true,
+          itemCount: paths.length,
+          itemBuilder: (_, i) => ListTile(
+            dense: true,
+            leading: const Icon(Icons.insert_drive_file_rounded),
+            title: Text(paths[i].split('\\').last.split('/').last),
+          ),
         ),
-        backgroundColor: success ? Colors.green : Colors.red,
       ),
-    );
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(ctx).pop(false),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(ctx).pop(true),
+          child: const Text('Send to Phone'),
+        ),
+      ],
+    ),
+  );
+  if (confirmed != true) return;
+
+  var sent = 0;
+  for (final path in paths) {
+    final success = await controller.sendFileToPhone(File(path));
+    if (success) sent++;
   }
+
+  if (!context.mounted) return;
+  ScaffoldMessenger.of(context).showSnackBar(
+    SnackBar(
+      content: Text(
+        'Sent $sent of ${paths.length} file${paths.length == 1 ? '' : 's'} to phone',
+      ),
+      backgroundColor: sent == paths.length ? Colors.green : Colors.orange,
+    ),
+  );
 }

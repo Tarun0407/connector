@@ -11,6 +11,9 @@ import android.os.Build
 import android.os.IBinder
 
 class ConnectorForegroundService : Service() {
+    private var currentTitle = "Connector is running"
+    private var currentText = "Remote pairing stays available after restart."
+
     override fun onCreate() {
         super.onCreate()
         createChannel()
@@ -25,6 +28,10 @@ class ConnectorForegroundService : Service() {
             android.os.Process.killProcess(android.os.Process.myPid())
             return START_NOT_STICKY
         }
+        intent?.getStringExtra(EXTRA_TITLE)?.let { currentTitle = it }
+        intent?.getStringExtra(EXTRA_TEXT)?.let { currentText = it }
+        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        manager.notify(NOTIFICATION_ID, buildNotification())
         return START_STICKY
     }
 
@@ -46,7 +53,6 @@ class ConnectorForegroundService : Service() {
             Notification.Builder(this)
         }
 
-        // Add Exit action button
         val stopIntent = Intent(this, ConnectorForegroundService::class.java)
         stopIntent.action = ACTION_STOP
         val stopPendingIntent = PendingIntent.getService(
@@ -59,18 +65,15 @@ class ConnectorForegroundService : Service() {
 
         return builder
             .setSmallIcon(applicationInfo.icon)
-            .setContentTitle("Connector is running")
-            .setContentText("Remote pairing stays available after restart.")
+            .setContentTitle(currentTitle)
+            .setContentText(currentText)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
             .build()
     }
 
     private fun createChannel() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
-            return
-        }
-
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         val channel = NotificationChannel(
             CHANNEL_ID,
@@ -84,5 +87,15 @@ class ConnectorForegroundService : Service() {
         private const val CHANNEL_ID = "connector_background"
         private const val NOTIFICATION_ID = 1208
         private const val ACTION_STOP = "com.example.connector.STOP_FOREGROUND"
+        private const val EXTRA_TITLE = "title"
+        private const val EXTRA_TEXT = "text"
+
+        fun updateStatus(context: Context, title: String, text: String) {
+            val intent = Intent(context, ConnectorForegroundService::class.java).apply {
+                putExtra(EXTRA_TITLE, title)
+                putExtra(EXTRA_TEXT, text)
+            }
+            context.startService(intent)
+        }
     }
 }

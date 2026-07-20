@@ -6,8 +6,16 @@ class LocalNetworkClient {
   static const int kPhonePort = 5006;
 
   Future<String> _readResponse(Socket socket) async {
-    final data = await socket.first;
-    return String.fromCharCodes(data);
+    final buffer = StringBuffer();
+    await for (final data in socket) {
+      buffer.write(String.fromCharCodes(data));
+      final str = buffer.toString();
+      final idx = str.indexOf('\n');
+      if (idx >= 0) {
+        return str.substring(0, idx);
+      }
+    }
+    return buffer.toString();
   }
 
   /// Sends a command directly to the laptop over the local network.
@@ -58,7 +66,11 @@ class LocalNetworkClient {
   }
 
   /// Probes whether a peer is reachable on the local network at [ip]:[port].
-  Future<bool> probeConnectivity(String ip, int port, {Duration timeout = const Duration(seconds: 2)}) async {
+  Future<bool> probeConnectivity(
+    String ip,
+    int port, {
+    Duration timeout = const Duration(seconds: 2),
+  }) async {
     try {
       final socket = await Socket.connect(ip, port, timeout: timeout);
       await socket.close();
@@ -69,7 +81,11 @@ class LocalNetworkClient {
   }
 
   /// Sends a file directly to the phone over the local network.
-  Future<bool> sendFileToPhone(String ip, File file) async {
+  Future<bool> sendFileToPhone(
+    String ip,
+    File file, {
+    void Function(int sentBytes, int totalBytes)? onProgress,
+  }) async {
     try {
       final socket = await Socket.connect(
         ip,
@@ -84,12 +100,17 @@ class LocalNetworkClient {
       await socket.flush();
 
       final fileStream = file.openRead();
+      var sent = 0;
       await for (final chunk in fileStream) {
         socket.add(chunk);
+        sent += chunk.length;
+        onProgress?.call(sent, size);
       }
 
       await socket.flush();
-      final response = await _readResponse(socket);
+      final response = await _readResponse(
+        socket,
+      ).timeout(const Duration(seconds: 20));
       await socket.close();
       return response.trim() == 'ok';
     } catch (e) {
