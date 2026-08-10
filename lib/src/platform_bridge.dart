@@ -185,6 +185,10 @@ class ConnectorPlatformBridge {
     return _invokeBool('showDisconnectedNotification');
   }
 
+  Future<bool> clearDisconnectedNotification() {
+    return _invokeBool('clearDisconnectedNotification');
+  }
+
   Future<bool> registerSendTo() => _invokeBool('registerSendTo');
 
   Future<bool> minimizeToTray() => _invokeBool('minimizeToTray');

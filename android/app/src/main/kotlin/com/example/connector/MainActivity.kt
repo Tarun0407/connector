@@ -125,6 +125,10 @@ class MainActivity : FlutterActivity() {
                     showDisconnectedNotification()
                     result.success(true)
                 }
+                "clearDisconnectedNotification" -> {
+                    clearDisconnectedNotification()
+                    result.success(true)
+                }
                 else -> result.notImplemented()
             }
         }
@@ -406,6 +410,8 @@ class MainActivity : FlutterActivity() {
         return true
     }
 
+    private var disconnectedCancelHandler: java.lang.Runnable? = null
+
     private fun showDisconnectedNotification() {
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -424,15 +430,25 @@ class MainActivity : FlutterActivity() {
         }
         val notification = builder
             .setContentTitle("Your device disconnected")
-            .setContentText("Looking for connections...")
+            .setContentText("Connector is continuing to search for your device")
             .setSmallIcon(android.R.drawable.ic_menu_info_details)
             .setAutoCancel(true)
             .build()
         manager.notify(DISCONNECTED_NOTIFICATION_ID, notification)
         // Auto-cancel after 5 seconds
-        android.os.Handler(mainLooper).postDelayed({
+        disconnectedCancelHandler?.let { android.os.Handler(mainLooper).removeCallbacks(it) }
+        val handler = java.lang.Runnable {
             manager.cancel(DISCONNECTED_NOTIFICATION_ID)
-        }, 5000)
+        }
+        disconnectedCancelHandler = handler
+        android.os.Handler(mainLooper).postDelayed(handler, 5000)
+    }
+
+    private fun clearDisconnectedNotification() {
+        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        manager.cancel(DISCONNECTED_NOTIFICATION_ID)
+        disconnectedCancelHandler?.let { android.os.Handler(mainLooper).removeCallbacks(it) }
+        disconnectedCancelHandler = null
     }
 
     private fun buildLaptopMediaNotification(state: LaptopMediaState): Notification {

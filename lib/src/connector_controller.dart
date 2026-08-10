@@ -62,6 +62,9 @@ class ConnectorController extends ChangeNotifier {
   bool clipboardSyncEnabled = false;
   bool _probingWifi = false;
   DateTime? _lastNotificationUpdate;
+  String? _lastKnownPeerIp;
+  int _probeFailures = 0;
+  static const int _probeFailureThreshold = 3;
 
   SharedPreferences? _preferences;
   StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _devicesSub;
@@ -184,6 +187,7 @@ class ConnectorController extends ChangeNotifier {
     _knownWindowFingerprints = <String>{};
     _lastLocalClipboard = null;
     _lastRemoteClipboard = null;
+    _lastKnownPeerIp = null;
     _shownSystemNotificationIds.clear();
     await _roomRef.set({
       'updatedAt': FieldValue.serverTimestamp(),
@@ -462,10 +466,10 @@ class ConnectorController extends ChangeNotifier {
       String? peerIp;
       int peerPort;
       if (role == DeviceRole.phone) {
-        peerIp = laptopLocalIp;
+        peerIp = laptopLocalIp ?? _lastKnownPeerIp;
         peerPort = LocalNetworkClient.kLocalPort;
       } else {
-        peerIp = primaryPhone?.localIp;
+        peerIp = primaryPhone?.localIp ?? _lastKnownPeerIp;
         peerPort = LocalNetworkClient.kPhonePort;
       }
 
@@ -474,11 +478,21 @@ class ConnectorController extends ChangeNotifier {
         _safeNotify();
         return;
       }
+      _lastKnownPeerIp = peerIp;
 
       await _refreshLocalIp();
       await _updatePresence();
 
-      isWifiReachable = await _localClient.probeConnectivity(peerIp, peerPort);
+      final reachable = await _localClient.probeConnectivity(peerIp, peerPort);
+      if (reachable) {
+        _probeFailures = 0;
+        isWifiReachable = true;
+      } else {
+        _probeFailures++;
+        if (_probeFailures >= _probeFailureThreshold) {
+          isWifiReachable = false;
+        }
+      }
       _safeNotify();
       unawaited(_updateConnectionNotification());
     } finally {
@@ -486,25 +500,36 @@ class ConnectorController extends ChangeNotifier {
     }
   }
 
+  bool _peerWasOnline = false;
+
   Future<void> _updateConnectionNotification() async {
     if (role != DeviceRole.phone) return;
     final peer = role == DeviceRole.phone ? primaryLaptop : primaryPhone;
-    if (peer != null && isDeviceOnline(peer)) {
+    final online = peer != null && isDeviceOnline(peer);
+
+    if (online) {
+      final wasOnline = _peerWasOnline;
+      _peerWasOnline = true;
       final mode = isWifiReachable ? 'local WiFi' : 'Cloud';
       await platform.updateForegroundStatus(
         'Your device is connected',
         'via $mode',
       );
+      if (!wasOnline) {
+        await platform.clearDisconnectedNotification();
+      }
     } else {
-      await platform.showDisconnectedNotification();
+      final wasOnline = _peerWasOnline;
+      _peerWasOnline = false;
       await platform.updateForegroundStatus(
         'Connector is running',
         'Looking for connections...',
       );
+      if (wasOnline) {
+        await platform.showDisconnectedNotification();
+      }
     }
   }
-
-  bool _peerWasOnline = false;
 
   Future<void> sendLaptopCommand(
     String type, {
@@ -750,11 +775,7 @@ class ConnectorController extends ChangeNotifier {
       }
 
       if (role == DeviceRole.phone) {
-        final peerOnline = peer != null && isDeviceOnline(peer);
-        if (!peerOnline && _peerWasOnline) {
-          unawaited(_updateConnectionNotification());
-        }
-        _peerWasOnline = peerOnline;
+        unawaited(_updateConnectionNotification());
       }
 
       _safeNotify();
@@ -1049,9 +1070,31 @@ class ConnectorController extends ChangeNotifier {
 
   void _startPresenceChecks() {
     _presenceCheckTimer?.cancel();
-    _presenceCheckTimer = Timer.periodic(const Duration(minutes: 3), (_) {
-      _safeNotify();
+    _presenceCheckTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+      unawaited(_refreshDiscoveryState());
     });
+  }
+
+  Future<void> _refreshDiscoveryState() async {
+    if (_disposed || !firebaseReady || !hasRoom) return;
+    try {
+      final docs = await _roomRef
+          .collection('devices')
+          .get(const GetOptions(source: Source.server));
+      final nextDevices =
+          docs.docs
+              .map((doc) => RemoteDevice.fromDoc(doc.id, doc.data()))
+              .toList()
+            ..sort((a, b) => a.role.index.compareTo(b.role.index));
+      if (!listEquals(devices, nextDevices)) {
+        devices = nextDevices;
+        _safeNotify();
+      }
+    } catch (_) {}
+    unawaited(_probeAndUpdateConnectivity());
+    if (role == DeviceRole.phone) {
+      unawaited(_updateConnectionNotification());
+    }
   }
 
   void _startDesktopPolling() {
