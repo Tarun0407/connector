@@ -13,6 +13,9 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.drawable.BitmapDrawable
 import android.media.MediaMetadata
 import android.media.AudioAttributes
 import android.media.AudioManager
@@ -29,6 +32,8 @@ import androidx.core.content.ContextCompat
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import java.io.File
+import java.io.FileOutputStream
 
 class MainActivity : FlutterActivity() {
     private var mediaPlayer: MediaPlayer? = null
@@ -128,6 +133,15 @@ class MainActivity : FlutterActivity() {
                 "clearDisconnectedNotification" -> {
                     clearDisconnectedNotification()
                     result.success(true)
+                }
+                "listInstalledApps" -> result.success(listInstalledApps())
+                "exportAppIcon" -> {
+                    val packageName = call.argument<String>("package") ?: ""
+                    result.success(exportAppIcon(packageName))
+                }
+                "getAppIconPath" -> {
+                    val packageName = call.argument<String>("package") ?: ""
+                    result.success(getAppIconPath(packageName))
                 }
                 else -> result.notImplemented()
             }
@@ -449,6 +463,59 @@ class MainActivity : FlutterActivity() {
         manager.cancel(DISCONNECTED_NOTIFICATION_ID)
         disconnectedCancelHandler?.let { android.os.Handler(mainLooper).removeCallbacks(it) }
         disconnectedCancelHandler = null
+    }
+
+    private fun listInstalledApps(): List<Map<String, String>> {
+        val pm = packageManager
+        val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+        val resolved = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            pm.queryIntentActivities(intent, PackageManager.ResolveInfoFlags.of(0))
+        } else {
+            @Suppress("DEPRECATION")
+            pm.queryIntentActivities(intent, 0)
+        }
+        val seen = mutableSetOf<String>()
+        val apps = mutableListOf<Map<String, String>>()
+        for (ri in resolved) {
+            val pkg = ri.activityInfo.packageName
+            if (!seen.add(pkg)) continue
+            val label = ri.loadLabel(pm).toString()
+            apps.add(mapOf("package" to pkg, "label" to label))
+        }
+        return apps
+    }
+
+    private fun exportAppIcon(packageName: String): String? {
+        return try {
+            val pm = packageManager
+            val ai = pm.getApplicationInfo(packageName, 0)
+            val iconDir = File(cacheDir, "appIcons")
+            if (!iconDir.exists()) iconDir.mkdirs()
+            val outFile = File(iconDir, "$packageName.png")
+            val drawable = ai.loadIcon(pm)
+            val bitmap = if (drawable is BitmapDrawable) {
+                drawable.bitmap
+            } else {
+                val width = drawable.intrinsicWidth.coerceAtLeast(1)
+                val height = drawable.intrinsicHeight.coerceAtLeast(1)
+                val bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+                val canvas = Canvas(bmp)
+                drawable.setBounds(0, 0, width, height)
+                drawable.draw(canvas)
+                bmp
+            }
+            FileOutputStream(outFile).use { fos ->
+                bitmap.compress(Bitmap.CompressFormat.PNG, 100, fos)
+            }
+            outFile.absolutePath
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun getAppIconPath(packageName: String): String {
+        val iconFile = File(cacheDir, "appIcons/$packageName.png")
+        return if (iconFile.exists()) iconFile.absolutePath else ""
     }
 
     private fun buildLaptopMediaNotification(state: LaptopMediaState): Notification {

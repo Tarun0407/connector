@@ -189,6 +189,27 @@ class ConnectorPlatformBridge {
     return _invokeBool('clearDisconnectedNotification');
   }
 
+  Future<List<Map<String, String>>> listInstalledApps() async {
+    final result = await _invoke<List<dynamic>>('listInstalledApps');
+    if (result == null) return const [];
+    return result
+        .whereType<Map>()
+        .map((item) => item.cast<String, String>())
+        .toList();
+  }
+
+  Future<String?> exportAppIcon(String packageName) {
+    return _invoke<String>('exportAppIcon', {'package': packageName});
+  }
+
+  Future<String?> getAppIconPath(String packageName) {
+    return _invoke<String>('getAppIconPath', {'package': packageName});
+  }
+
+  Future<String?> getAppIconsDir() {
+    return _invoke<String>('getAppIconsDir');
+  }
+
   Future<bool> registerSendTo() => _invokeBool('registerSendTo');
 
   Future<bool> minimizeToTray() => _invokeBool('minimizeToTray');

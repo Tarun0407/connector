@@ -153,6 +153,17 @@ std::wstring GetDownloadsPath() {
     return L"C:\\Users\\Public\\Downloads\\Connector";
 }
 
+std::wstring GetAppIconsPath() {
+    wchar_t* appData = nullptr;
+    size_t len = 0;
+    if (_wdupenv_s(&appData, &len, L"APPDATA") == 0 && appData != nullptr) {
+        std::wstring path = std::wstring(appData) + L"\\Connector\\appIcons";
+        free(appData);
+        return path;
+    }
+    return L"C:\\Users\\Public\\Connector\\appIcons";
+}
+
 std::string ReadLine(SOCKET sock) {
     std::string line;
     char c;
@@ -190,6 +201,37 @@ void HandleLocalClient(SOCKET clientSocket) {
             fwrite(buffer, 1, read, file);
         }
         fclose(file);
+        SendOk(clientSocket);
+    } else if (command == "sendIcon") {
+        std::string header = ReadLine(clientSocket);
+        if (header.empty()) { closesocket(clientSocket); return; }
+        size_t delimiterPos = header.find('|');
+        if (delimiterPos == std::string::npos) { closesocket(clientSocket); return; }
+        std::string packageName = header.substr(0, delimiterPos);
+        long long fileSize = std::stoll(header.substr(delimiterPos + 1));
+        std::wstring iconsPath = GetAppIconsPath();
+        CreateDirectoryW(iconsPath.c_str(), nullptr);
+        std::wstring fullPath = iconsPath + L"\\" + Utf8ToWide(packageName) + L".png";
+        FILE* file = nullptr;
+        _wfopen_s(&file, fullPath.c_str(), L"wb");
+        if (!file) { closesocket(clientSocket); return; }
+        char buffer[4096];
+        long long totalReceived = 0;
+        while (totalReceived < fileSize) {
+            int toRead = static_cast<int>((sizeof(buffer) < static_cast<size_t>(fileSize - totalReceived)) ? sizeof(buffer) : static_cast<size_t>(fileSize - totalReceived));
+            int read = recv(clientSocket, buffer, toRead, 0);
+            if (read <= 0) break;
+            totalReceived += read;
+            fwrite(buffer, 1, read, file);
+        }
+        fclose(file);
+        SendOk(clientSocket);
+    } else if (command == "deleteIcon") {
+        std::string packageName = ReadLine(clientSocket);
+        if (!packageName.empty()) {
+            std::wstring fullPath = GetAppIconsPath() + L"\\" + Utf8ToWide(packageName) + L".png";
+            DeleteFileW(fullPath.c_str());
+        }
         SendOk(clientSocket);
     } else {
         if (command == "volumeUp") { SendVirtualKey(VK_VOLUME_UP); SendOk(clientSocket); }
@@ -635,6 +677,22 @@ void HandleMethodCall(
             ShellExecuteW(nullptr, L"open", Utf8ToWide(path).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
         }
         result->Success(EncodableValue(true));
+        return;
+    }
+    if (method == "getAppIconPath") {
+        std::string packageName = ReadStringArgument(call.arguments(), "package", "");
+        std::wstring fullPath = GetAppIconsPath() + L"\\" + Utf8ToWide(packageName) + L".png";
+        if (GetFileAttributesW(fullPath.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            result->Success(EncodableValue(WideToUtf8(fullPath)));
+        } else {
+            result->Success(EncodableValue(""));
+        }
+        return;
+    }
+    if (method == "getAppIconsDir") {
+        std::wstring iconsPath = GetAppIconsPath();
+        CreateDirectoryW(iconsPath.c_str(), nullptr);
+        result->Success(EncodableValue(WideToUtf8(iconsPath)));
         return;
     }
 

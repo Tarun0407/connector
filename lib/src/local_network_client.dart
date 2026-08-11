@@ -117,4 +117,53 @@ class LocalNetworkClient {
       return false;
     }
   }
+
+  /// Sends an app icon PNG to the laptop over the local network.
+  Future<bool> sendIcon(String ip, String packageName, File iconFile) async {
+    try {
+      final socket = await Socket.connect(
+        ip,
+        kLocalPort,
+        timeout: const Duration(seconds: 5),
+      );
+      final size = await iconFile.length();
+      socket.writeln('sendIcon');
+      socket.writeln('$packageName|$size');
+      await socket.flush();
+
+      final fileStream = iconFile.openRead();
+      await for (final chunk in fileStream) {
+        socket.add(chunk);
+      }
+      await socket.flush();
+      final response = await _readResponse(
+        socket,
+      ).timeout(const Duration(seconds: 20));
+      await socket.close();
+      return response.trim() == 'ok';
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /// Asks the laptop to delete a stored app icon.
+  Future<bool> deleteIcon(String ip, String packageName) async {
+    try {
+      final socket = await Socket.connect(
+        ip,
+        kLocalPort,
+        timeout: const Duration(seconds: 2),
+      );
+      socket.writeln('deleteIcon');
+      socket.writeln(packageName);
+      await socket.flush();
+      final response = await _readResponse(
+        socket,
+      ).timeout(const Duration(seconds: 5));
+      await socket.close();
+      return response.trim() == 'ok';
+    } catch (e) {
+      return false;
+    }
+  }
 }

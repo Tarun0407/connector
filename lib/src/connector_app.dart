@@ -941,7 +941,10 @@ class _LaptopHome extends StatelessWidget {
       _Panel(
         title: 'Recent Activity',
         icon: Icons.receipt_long_rounded,
-        child: _ActivityList(events: controller.events.take(8).toList()),
+        child: _ActivityList(
+          events: controller.events.take(8).toList(),
+          controller: controller,
+        ),
       ),
       _Panel(
         title: 'Startup',
@@ -1078,6 +1081,7 @@ class _PhoneHomeState extends State<_PhoneHome> {
         icon: Icons.history_rounded,
         child: _ActivityList(
           events: widget.controller.events.take(20).toList(),
+          controller: widget.controller,
         ),
       ),
       _Panel(
@@ -1602,9 +1606,10 @@ class _DeviceListTile extends StatelessWidget {
 }
 
 class _ActivityList extends StatelessWidget {
-  const _ActivityList({required this.events});
+  const _ActivityList({required this.events, this.controller});
 
   final List<ActivityEvent> events;
+  final ConnectorController? controller;
 
   @override
   Widget build(BuildContext context) {
@@ -1625,7 +1630,10 @@ class _ActivityList extends StatelessWidget {
             return ListTile(
               dense: true,
               contentPadding: EdgeInsets.zero,
-              leading: Icon(_eventIcon(event.type)),
+              leading: _EventLeading(
+                event: event,
+                controller: controller,
+              ),
               title: Text(
                 event.title,
                 maxLines: 1,
@@ -1645,7 +1653,80 @@ class _ActivityList extends StatelessWidget {
     );
   }
 
-  IconData _eventIcon(String type) {
+  String _eventSubtitle(ActivityEvent event) {
+    final time = event.originalTime;
+    if (time == null || event.type != 'phone.notification') {
+      return event.detail;
+    }
+
+    final hour = time.hour.toString().padLeft(2, '0');
+    final minute = time.minute.toString().padLeft(2, '0');
+    return '$hour:$minute  ${event.detail}';
+  }
+}
+
+class _EventLeading extends StatefulWidget {
+  const _EventLeading({required this.event, this.controller});
+
+  final ActivityEvent event;
+  final ConnectorController? controller;
+
+  @override
+  State<_EventLeading> createState() => _EventLeadingState();
+}
+
+class _EventLeadingState extends State<_EventLeading> {
+  String? _iconPath;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadIcon();
+  }
+
+  @override
+  void didUpdateWidget(covariant _EventLeading oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.event.package != widget.event.package) {
+      _iconPath = null;
+      _loadIcon();
+    }
+  }
+
+  Future<void> _loadIcon() async {
+    final event = widget.event;
+    if (event.type != 'phone.notification' ||
+        event.package == null ||
+        event.package!.isEmpty ||
+        widget.controller == null) {
+      return;
+    }
+    final path = await widget.controller!.appIconPath(event.package!);
+    if (!mounted) return;
+    if (path == null || path.isEmpty || !File(path).existsSync()) return;
+    setState(() => _iconPath = path);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final path = _iconPath;
+    if (path != null) {
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(6),
+        child: Image.file(
+          File(path),
+          width: 24,
+          height: 24,
+          fit: BoxFit.cover,
+          errorBuilder: (_, _, _) =>
+              Icon(_fallbackIcon(widget.event.type), size: 24),
+        ),
+      );
+    }
+    return Icon(_fallbackIcon(widget.event.type));
+  }
+
+  IconData _fallbackIcon(String type) {
     if (type.contains('opened')) {
       return Icons.open_in_new_rounded;
     }
@@ -1656,17 +1737,6 @@ class _ActivityList extends StatelessWidget {
       return Icons.error_outline_rounded;
     }
     return Icons.check_circle_outline_rounded;
-  }
-
-  String _eventSubtitle(ActivityEvent event) {
-    final time = event.originalTime;
-    if (time == null || event.type != 'phone.notification') {
-      return event.detail;
-    }
-
-    final hour = time.hour.toString().padLeft(2, '0');
-    final minute = time.minute.toString().padLeft(2, '0');
-    return '$hour:$minute  ${event.detail}';
   }
 }
 

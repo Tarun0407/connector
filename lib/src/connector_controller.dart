@@ -77,7 +77,11 @@ class ConnectorController extends ChangeNotifier {
   Timer? _desktopPollTimer;
   Timer? _presenceCheckTimer;
   Timer? _clipboardPollTimer;
+  Timer? _iconSyncTimer;
   Future<void> _phoneFileSendQueue = Future<void>.value();
+
+  Set<String> _sentIconPackages = <String>{};
+  bool _syncingIcons = false;
 
   StreamSubscription<List<String>>? _incomingSharesSub;
   String? _lastLocalClipboard;
@@ -124,6 +128,9 @@ class ConnectorController extends ChangeNotifier {
         _preferences!.getStringList('connector.receivedFiles') ?? [];
     phoneReceivedFiles =
         _preferences!.getStringList('connector.phoneReceivedFiles') ?? [];
+    _sentIconPackages =
+        (_preferences!.getStringList('connector.sentIconPackages') ?? <String>[])
+            .toSet();
 
     try {
       if (Firebase.apps.isEmpty) {
@@ -201,6 +208,7 @@ class ConnectorController extends ChangeNotifier {
     _listenForLaptopMediaNotificationActions();
     _startHeartbeat();
     _startPresenceChecks();
+    _startIconSync();
 
     if (role == DeviceRole.laptop) {
       _startDesktopPolling();
@@ -517,6 +525,7 @@ class ConnectorController extends ChangeNotifier {
       );
       if (!wasOnline) {
         await platform.clearDisconnectedNotification();
+        unawaited(_syncAppIcons());
       }
     } else {
       final wasOnline = _peerWasOnline;
@@ -681,6 +690,9 @@ class ConnectorController extends ChangeNotifier {
       case 'laptop.refresh':
         await refreshDesktopSnapshot(publishChanges: false);
         return;
+      case 'laptop.syncAppIcon':
+        await _applyAppIconSync(payload);
+        return;
       case 'phone.ring':
         await platform.ringPhone();
         return;
@@ -696,8 +708,7 @@ class ConnectorController extends ChangeNotifier {
         await refreshPhoneState();
         return;
       case 'laptop.localFileReceived':
-        final fileName = payload['fileName'] as String?;
-        if (fileName != null) {
+        final fileName = payload['fileName'] as String?;        if (fileName != null) {
           final file = File(_downloadsDir + Platform.pathSeparator + fileName);
           if (await file.exists()) {
             receivedFiles = [file.path, ...receivedFiles.take(19)];
@@ -862,6 +873,7 @@ class ConnectorController extends ChangeNotifier {
           title: title.trim().isEmpty ? packageName : title,
           detail: text.trim().isEmpty ? packageName : text,
           originalTime: originalTime,
+          package: packageName,
         ),
       );
     });
@@ -1011,6 +1023,7 @@ class ConnectorController extends ChangeNotifier {
     required String title,
     required String detail,
     DateTime? originalTime,
+    String? package,
   }) async {
     if (!firebaseReady || !hasRoom) return;
     try {
@@ -1021,6 +1034,7 @@ class ConnectorController extends ChangeNotifier {
         'source': role.key,
         'sourceDeviceId': deviceId,
         'createdAt': FieldValue.serverTimestamp(),
+        'package': ?package,
         if (originalTime != null)
           'originalTime': Timestamp.fromDate(originalTime),
       });
@@ -1097,6 +1111,144 @@ class ConnectorController extends ChangeNotifier {
     }
   }
 
+  void _startIconSync() {
+    if (role != DeviceRole.phone) return;
+    _iconSyncTimer?.cancel();
+    _iconSyncTimer = Timer.periodic(const Duration(minutes: 1), (_) {
+      unawaited(_syncAppIcons());
+    });
+  }
+
+  Future<void> _syncAppIcons() async {
+    if (_disposed ||
+        role != DeviceRole.phone ||
+        !firebaseReady ||
+        !hasRoom ||
+        _syncingIcons) {
+      return;
+    }
+    final peer = primaryLaptop;
+    if (peer == null || !isDeviceOnline(peer)) return;
+
+    _syncingIcons = true;
+    try {
+      final apps = await platform.listInstalledApps();
+      final installed = apps
+          .map((app) => app['package'])
+          .whereType<String>()
+          .where((p) => p.isNotEmpty)
+          .toSet();
+
+      final added = installed.difference(_sentIconPackages).toList();
+      final removed = _sentIconPackages.difference(installed).toList();
+      if (added.isEmpty && removed.isEmpty) return;
+
+      final useWifi = isWifiReachable && laptopLocalIp != null;
+
+      for (final packageName in removed) {
+        if (useWifi) {
+          await _localClient.deleteIcon(laptopLocalIp!, packageName);
+        }
+        _sentIconPackages.remove(packageName);
+      }
+
+      if (useWifi) {
+        for (final packageName in added) {
+          final iconPath = await platform.exportAppIcon(packageName);
+          if (iconPath == null || !File(iconPath).existsSync()) continue;
+          final success = await _localClient.sendIcon(
+            laptopLocalIp!,
+            packageName,
+            File(iconPath),
+          );
+          if (success) {
+            _sentIconPackages.add(packageName);
+          }
+        }
+      } else {
+        final cloudIcons = <Map<String, Object?>>[];
+        for (final packageName in added) {
+          final iconPath = await platform.exportAppIcon(packageName);
+          if (iconPath == null || !File(iconPath).existsSync()) continue;
+          final url = await _uploadAppIcon(packageName, File(iconPath));
+          if (url != null) {
+            cloudIcons.add({'package': packageName, 'url': url});
+            _sentIconPackages.add(packageName);
+          }
+        }
+        if (cloudIcons.isNotEmpty || removed.isNotEmpty) {
+          await sendCommand(
+            DeviceRole.laptop,
+            'laptop.syncAppIcon',
+            payload: {
+              'added': cloudIcons,
+              'removed': removed,
+            },
+          );
+        }
+      }
+
+      await _preferences?.setStringList(
+        'connector.sentIconPackages',
+        _sentIconPackages.toList(),
+      );
+    } catch (_) {
+    } finally {
+      _syncingIcons = false;
+    }
+  }
+
+  Future<String?> _uploadAppIcon(String packageName, File iconFile) async {
+    try {
+      if (roomCode == null) return null;
+      final ref = FirebaseStorage.instance
+          .ref()
+          .child('appIcons/$roomCode/$packageName.png');
+      await ref.putFile(iconFile);
+      return ref.getDownloadURL();
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _applyAppIconSync(Map<String, Object?> payload) async {
+    final added = (payload['added'] as List?) ?? const [];
+    final removed = (payload['removed'] as List?) ?? const [];
+
+    for (final entry in added) {
+      if (entry is! Map) continue;
+      final packageName = (entry['package'] ?? '').toString();
+      final url = (entry['url'] ?? '').toString();
+      if (packageName.isEmpty || url.isEmpty) continue;
+      final dir = await platform.getAppIconsDir();
+      if (dir == null || dir.isEmpty) continue;
+      try {
+        final response = await http.get(Uri.parse(url));
+        if (response.statusCode == 200) {
+          final file = File('$dir${Platform.pathSeparator}$packageName.png');
+          if (!file.parent.existsSync()) {
+            file.parent.createSync(recursive: true);
+          }
+          await file.writeAsBytes(response.bodyBytes);
+        }
+      } catch (_) {}
+    }
+
+    for (final packageName in removed) {
+      if (packageName is! String || packageName.isEmpty) continue;
+      final dir = await platform.getAppIconsDir();
+      if (dir == null || dir.isEmpty) continue;
+      try {
+        final file = File('$dir${Platform.pathSeparator}$packageName.png');
+        if (file.existsSync()) await file.delete();
+      } catch (_) {}
+    }
+  }
+
+  Future<String?> appIconPath(String packageName) {
+    return platform.getAppIconPath(packageName);
+  }
+
   void _startDesktopPolling() {
     _desktopPollTimer?.cancel();
     _pollDesktopSnapshot(publishChanges: false);
@@ -1124,6 +1276,7 @@ class ConnectorController extends ChangeNotifier {
     _heartbeatTimer?.cancel();
     _desktopPollTimer?.cancel();
     _presenceCheckTimer?.cancel();
+    _iconSyncTimer?.cancel();
     _stopClipboardPolling();
     await _devicesSub?.cancel();
     await _eventsSub?.cancel();

@@ -259,6 +259,7 @@ class ActivityEvent {
     required this.source,
     required this.createdAt,
     this.originalTime,
+    this.package,
   });
 
   factory ActivityEvent.fromDoc(String id, Map<String, Object?> data) {
@@ -270,6 +271,7 @@ class ActivityEvent {
       source: DeviceRole.fromKey(data['source']?.toString()),
       createdAt: readFirestoreDate(data['createdAt']) ?? DateTime.now(),
       originalTime: readFirestoreDate(data['originalTime']),
+      package: (data['package'] as String?),
     );
   }
 
@@ -280,4 +282,5 @@ class ActivityEvent {
   final DeviceRole source;
   final DateTime createdAt;
   final DateTime? originalTime;
+  final String? package;
 }
