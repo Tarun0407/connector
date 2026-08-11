@@ -178,6 +178,7 @@ class RemoteDevice {
     this.remoteUnlockReady = false,
     this.media,
     this.localIp,
+    this.localIps = const <String>[],
     this.connectivityMode = ConnectivityMode.wifi,
     this.clipboard,
     this.clipboardSync = false,
@@ -217,6 +218,10 @@ class RemoteDevice {
           : null,
       remoteUnlockReady: data['remoteUnlockReady'] == true,
       localIp: (data['localIp'] ?? '').toString(),
+      localIps: (data['localIps'] as List<dynamic>?)
+              ?.whereType<String>()
+              .toList() ??
+          const <String>[],
       connectivityMode: ConnectivityMode.values.firstWhere(
         (m) => m.key == data['connectivityMode'],
         orElse: () => ConnectivityMode.wifi,
@@ -244,6 +249,7 @@ class RemoteDevice {
   final bool? notificationAccessEnabled;
   final bool remoteUnlockReady;
   final String? localIp;
+  final List<String> localIps;
   final ConnectivityMode connectivityMode;
   final MediaState? media;
   final String? clipboard;

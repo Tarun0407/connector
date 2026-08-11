@@ -4,6 +4,10 @@
 #include <windows.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#include <shobjidl.h>
+#include <propkey.h>
+#include <propsys.h>
+#include <propvarutil.h>
 #include <endpointvolume.h>
 #include <mmdeviceapi.h>
 #include <iostream>
@@ -27,9 +31,12 @@
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Media.Control.h>
 #include <winrt/Windows.Devices.Enumeration.h>
+#include <winrt/Windows.UI.Notifications.h>
+#include <winrt/Windows.Data.Xml.Dom.h>
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "propsys.lib")
 
 namespace {
 
@@ -41,11 +48,14 @@ using flutter::MethodResult;
 using flutter::MethodChannel;
 using flutter::StandardMethodCodec;
 namespace media_control = winrt::Windows::Media::Control;
+namespace notifications = winrt::Windows::UI::Notifications;
+namespace xml_dom = winrt::Windows::Data::Xml::Dom;
 
 constexpr char kChannelName[] = "connector/platform";
 constexpr wchar_t kRunKeyPath[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 constexpr wchar_t kAutoStartValueName[] = L"Connector";
 constexpr wchar_t kNotificationWindowClass[] = L"ConnectorNotificationWindow";
+constexpr wchar_t kAumid[] = L"Connector.Connector";
 constexpr int kLocalPort = 5005;
 constexpr UINT kTrayIconId = 1208;
 constexpr UINT WM_APP_TRAY = WM_APP + 1;
@@ -183,8 +193,13 @@ void HandleLocalClient(SOCKET clientSocket) {
         if (header.empty()) { closesocket(clientSocket); return; }
         size_t delimiterPos = header.find('|');
         if (delimiterPos == std::string::npos) { closesocket(clientSocket); return; }
+        long long fileSize = 0;
+        try {
+            fileSize = std::stoll(header.substr(delimiterPos + 1));
+        } catch (...) {
+            closesocket(clientSocket); return;
+        }
         std::string fileName = header.substr(0, delimiterPos);
-        long long fileSize = std::stoll(header.substr(delimiterPos + 1));
         std::wstring downloadsPath = GetDownloadsPath();
         std::wstring fullPath = downloadsPath + L"\\" + Utf8ToWide(fileName);
         CreateDirectoryW(downloadsPath.c_str(), nullptr);
@@ -208,7 +223,12 @@ void HandleLocalClient(SOCKET clientSocket) {
         size_t delimiterPos = header.find('|');
         if (delimiterPos == std::string::npos) { closesocket(clientSocket); return; }
         std::string packageName = header.substr(0, delimiterPos);
-        long long fileSize = std::stoll(header.substr(delimiterPos + 1));
+        long long fileSize = 0;
+        try {
+            fileSize = std::stoll(header.substr(delimiterPos + 1));
+        } catch (...) {
+            closesocket(clientSocket); return;
+        }
         std::wstring iconsPath = GetAppIconsPath();
         CreateDirectoryW(iconsPath.c_str(), nullptr);
         std::wstring fullPath = iconsPath + L"\\" + Utf8ToWide(packageName) + L".png";
@@ -332,7 +352,11 @@ void CreateSystemTrayIcon() {
     nid.uID = kTrayIconId;
     nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     nid.uCallbackMessage = WM_APP_TRAY;
-    nid.hIcon = LoadIcon(GetModuleHandle(nullptr), MAKEINTRESOURCE(IDI_APP_ICON));
+    HICON appIcon = LoadIcon(GetModuleHandle(nullptr), MAKEINTRESOURCE(IDI_APP_ICON));
+    if (appIcon == nullptr) {
+        appIcon = LoadIcon(nullptr, IDI_APPLICATION);
+    }
+    nid.hIcon = appIcon;
     wcsncpy_s(nid.szTip, L"Connector", _TRUNCATE);
     g_trayIconCreated = Shell_NotifyIconW(NIM_ADD, &nid) == TRUE;
 }
@@ -347,7 +371,76 @@ void RemoveSystemTrayIcon() {
     g_trayIconCreated = false;
 }
 
+// Registers an AppUserModelID for this app by creating a Start Menu shortcut,
+// which allows Windows toast notifications to be delivered and stored in the
+// Action Center.
+bool EnsureToastRegistration() {
+    wchar_t exePath[MAX_PATH];
+    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+
+    wchar_t appData[MAX_PATH];
+    if (SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0, appData) != S_OK) {
+        return false;
+    }
+    std::wstring shortcutDir = std::wstring(appData) + L"\\Microsoft\\Windows\\Start Menu\\Programs";
+    CreateDirectoryW(shortcutDir.c_str(), nullptr);
+    std::wstring shortcutPath = shortcutDir + L"\\Connector.lnk";
+
+    IShellLinkW* shellLink = nullptr;
+    if (FAILED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER,
+                                IID_PPV_ARGS(&shellLink)))) {
+        return false;
+    }
+    shellLink->SetPath(exePath);
+    shellLink->SetDescription(L"Connector");
+    shellLink->SetIconLocation(exePath, 0);
+
+    IPersistFile* persistFile = nullptr;
+    bool ok = false;
+    if (SUCCEEDED(shellLink->QueryInterface(IID_PPV_ARGS(&persistFile)))) {
+        if (SUCCEEDED(persistFile->Save(shortcutPath.c_str(), TRUE))) {
+            IPropertyStore* propertyStore = nullptr;
+            if (SUCCEEDED(shellLink->QueryInterface(IID_PPV_ARGS(&propertyStore)))) {
+                PROPVARIANT prop;
+                PropVariantInit(&prop);
+                if (SUCCEEDED(InitPropVariantFromString(kAumid, &prop))) {
+                    if (SUCCEEDED(propertyStore->SetValue(PKEY_AppUserModel_ID, prop))) {
+                        ok = SUCCEEDED(propertyStore->Commit());
+                    }
+                    PropVariantClear(&prop);
+                }
+                propertyStore->Release();
+            }
+        }
+        persistFile->Release();
+    }
+    shellLink->Release();
+    return ok;
+}
+
+// Shows a persistent toast notification (stored in the Windows Action Center).
+bool ShowToastNotification(const std::string& title, const std::string& body) {
+    try {
+        EnsureToastRegistration();
+        auto xmlDoc = notifications::ToastNotificationManager::GetTemplateContent(
+            notifications::ToastTemplateType::ToastText02);
+        auto texts = xmlDoc.GetElementsByTagName(L"text");
+        if (texts.Size() < 2) return false;
+        texts.Item(0).InnerText(winrt::hstring(Utf8ToWide(title)));
+        texts.Item(1).InnerText(winrt::hstring(Utf8ToWide(body)));
+        notifications::ToastNotification toast(xmlDoc);
+        auto notifier = notifications::ToastNotificationManager::CreateToastNotifier(kAumid);
+        notifier.Show(toast);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
 bool ShowSystemNotification(const std::string& title, const std::string& body) {
+    if (ShowToastNotification(title, body)) {
+        return true;
+    }
     CreateSystemTrayIcon();
     HWND hwnd = NotificationHostWindow();
     if (hwnd == nullptr) return false;

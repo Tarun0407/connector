@@ -1677,11 +1677,25 @@ class _EventLeading extends StatefulWidget {
 
 class _EventLeadingState extends State<_EventLeading> {
   String? _iconPath;
+  bool _loadingIcon = false;
 
   @override
   void initState() {
     super.initState();
+    widget.controller?.addListener(_onControllerChanged);
     _loadIcon();
+  }
+
+  @override
+  void dispose() {
+    widget.controller?.removeListener(_onControllerChanged);
+    super.dispose();
+  }
+
+  void _onControllerChanged() {
+    if (_iconPath == null && !_loadingIcon) {
+      _loadIcon();
+    }
   }
 
   @override
@@ -1694,6 +1708,7 @@ class _EventLeadingState extends State<_EventLeading> {
   }
 
   Future<void> _loadIcon() async {
+    if (_loadingIcon) return;
     final event = widget.event;
     if (event.type != 'phone.notification' ||
         event.package == null ||
@@ -1701,7 +1716,9 @@ class _EventLeadingState extends State<_EventLeading> {
         widget.controller == null) {
       return;
     }
+    _loadingIcon = true;
     final path = await widget.controller!.appIconPath(event.package!);
+    _loadingIcon = false;
     if (!mounted) return;
     if (path == null || path.isEmpty || !File(path).existsSync()) return;
     setState(() => _iconPath = path);

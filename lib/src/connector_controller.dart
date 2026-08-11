@@ -41,6 +41,7 @@ class ConnectorController extends ChangeNotifier {
   String? laptopLocalIp;
   String? phoneLocalIp;
   String? localIp;
+  List<String> localIps = const [];
   bool isWifiReachable = false;
   int maxCloudUploadSize = 100;
   List<RemoteDevice> devices = const [];
@@ -73,6 +74,7 @@ class ConnectorController extends ChangeNotifier {
   StreamSubscription<Map<String, Object?>>? _phoneNotificationsSub;
   StreamSubscription<Map<String, Object?>>? _laptopMediaActionsSub;
   ServerSocket? _phoneFileServer;
+  Timer? _phoneFileServerRetry;
   Timer? _heartbeatTimer;
   Timer? _desktopPollTimer;
   Timer? _presenceCheckTimer;
@@ -95,6 +97,15 @@ class ConnectorController extends ChangeNotifier {
   RemoteDevice? get primaryLaptop => _firstDevice(DeviceRole.laptop);
   RemoteDevice? get primaryPhone => _firstDevice(DeviceRole.phone);
   bool get hasRoom => roomCode != null && roomCode!.isNotEmpty;
+
+  /// The last IP verified reachable by the WiFi probe, falling back to the
+  /// IP published by the peer in Firestore.
+  String? get _effectivePeerIp {
+    if (_lastKnownPeerIp != null && _lastKnownPeerIp!.isNotEmpty) {
+      return _lastKnownPeerIp;
+    }
+    return role == DeviceRole.phone ? laptopLocalIp : phoneLocalIp;
+  }
 
   bool isDeviceOnline(RemoteDevice device) {
     if (!device.online || device.lastSeen == null) return false;
@@ -335,7 +346,8 @@ class ConnectorController extends ChangeNotifier {
   Future<bool> sendFile(File file) async {
     final sizeInMb = (await file.length()) / (1024 * 1024);
 
-    if (isWifiReachable && laptopLocalIp != null) {
+    final peerIp = _effectivePeerIp;
+    if (isWifiReachable && peerIp != null) {
       uploadProgress = null;
       _safeNotify();
       _updateTransferNotification(
@@ -345,7 +357,7 @@ class ConnectorController extends ChangeNotifier {
       );
       // Try local WiFi with retry
       for (int attempt = 0; attempt < 2; attempt++) {
-        final success = await _localClient.sendFile(laptopLocalIp!, file);
+        final success = await _localClient.sendFile(peerIp, file);
         if (success) {
           unawaited(platform.cancelTransferNotification());
           unawaited(
@@ -471,29 +483,43 @@ class ConnectorController extends ChangeNotifier {
     if (_probingWifi) return;
     _probingWifi = true;
     try {
-      String? peerIp;
-      int peerPort;
+      final int peerPort;
+      final List<String> candidates;
       if (role == DeviceRole.phone) {
-        peerIp = laptopLocalIp ?? _lastKnownPeerIp;
         peerPort = LocalNetworkClient.kLocalPort;
+        final ip = laptopLocalIp;
+        candidates = [
+          if (ip != null && ip.isNotEmpty) ip,
+          ...?primaryLaptop?.localIps,
+          ?_lastKnownPeerIp,
+        ];
       } else {
-        peerIp = primaryPhone?.localIp ?? _lastKnownPeerIp;
         peerPort = LocalNetworkClient.kPhonePort;
+        final ip = phoneLocalIp;
+        candidates = [
+          if (ip != null && ip.isNotEmpty) ip,
+          ...?primaryPhone?.localIps,
+          ?_lastKnownPeerIp,
+        ];
       }
 
-      if (peerIp == null || peerIp.isEmpty) {
-        isWifiReachable = false;
-        _safeNotify();
-        return;
+      String? workingIp;
+      for (final ip in <String>{...candidates}) {
+        if (ip.isEmpty) continue;
+        if (await _localClient.probeConnectivity(ip, peerPort)) {
+          workingIp = ip;
+          break;
+        }
       }
-      _lastKnownPeerIp = peerIp;
 
-      await _refreshLocalIp();
-      await _updatePresence();
-
-      final reachable = await _localClient.probeConnectivity(peerIp, peerPort);
-      if (reachable) {
+      if (workingIp != null) {
         _probeFailures = 0;
+        _lastKnownPeerIp = workingIp;
+        if (role == DeviceRole.phone) {
+          laptopLocalIp = workingIp;
+        } else {
+          phoneLocalIp = workingIp;
+        }
         isWifiReachable = true;
       } else {
         _probeFailures++;
@@ -544,11 +570,11 @@ class ConnectorController extends ChangeNotifier {
     String type, {
     Map<String, Object?> payload = const {},
   }) async {
-    if (isWifiReachable && laptopLocalIp != null) {
+    if (isWifiReachable && _effectivePeerIp != null) {
       final localCommand = _mapCommandToLocal(type);
       if (localCommand != null) {
         final success = await _localClient.sendCommand(
-          laptopLocalIp!,
+          _effectivePeerIp!,
           localCommand,
         );
         if (success) {
@@ -1038,23 +1064,48 @@ class ConnectorController extends ChangeNotifier {
         if (originalTime != null)
           'originalTime': Timestamp.fromDate(originalTime),
       });
-    } catch (_) {}
+    } catch (_) {
+      await Future<void>.delayed(const Duration(seconds: 2));
+      try {
+        await _roomRef.collection('events').add({
+          'type': type,
+          'title': title,
+          'detail': detail,
+          'source': role.key,
+          'sourceDeviceId': deviceId,
+          'createdAt': FieldValue.serverTimestamp(),
+          'package': ?package,
+          if (originalTime != null)
+            'originalTime': Timestamp.fromDate(originalTime),
+        });
+      } catch (_) {}
+    }
   }
 
   Future<void> _refreshLocalIp() async {
     try {
+      final candidates = <String>{};
       final interfaces = await NetworkInterface.list();
       for (final iface in interfaces) {
         for (final addr in iface.addresses) {
-          if (addr.type == InternetAddressType.IPv4 &&
-              !addr.isLoopback &&
-              addr.address.startsWith('192.168.')) {
-            localIp = addr.address;
-            return;
+          if (addr.type == InternetAddressType.IPv4 && !addr.isLoopback) {
+            candidates.add(addr.address);
           }
         }
       }
+      final sorted = candidates.toList()
+        ..sort((a, b) => _ipPriority(a).compareTo(_ipPriority(b)));
+      localIps = sorted;
+      localIp = sorted.isNotEmpty ? sorted.first : null;
     } catch (_) {}
+  }
+
+  static int _ipPriority(String ip) {
+    if (ip.startsWith('192.168.')) return 0;
+    if (ip.startsWith('10.')) return 1;
+    if (RegExp(r'^172\.(1[6-9]|2\d|3[01])\.').hasMatch(ip)) return 2;
+    if (ip.startsWith('169.254.')) return 4;
+    return 3;
   }
 
   Future<void> _updatePresence({Map<String, Object?> extra = const {}}) async {
@@ -1070,6 +1121,7 @@ class ConnectorController extends ChangeNotifier {
       'lastSeen': FieldValue.serverTimestamp(),
       'capabilities': _capabilitiesForRole(),
       if (localIp != null) 'localIp': localIp,
+      if (localIps.isNotEmpty) 'localIps': localIps,
       'wifiReachable': isWifiReachable,
       ...extra,
     }, SetOptions(merge: true));
@@ -1143,11 +1195,12 @@ class ConnectorController extends ChangeNotifier {
       final removed = _sentIconPackages.difference(installed).toList();
       if (added.isEmpty && removed.isEmpty) return;
 
-      final useWifi = isWifiReachable && laptopLocalIp != null;
+      final peerIp = _effectivePeerIp;
+      final useWifi = isWifiReachable && peerIp != null;
 
       for (final packageName in removed) {
         if (useWifi) {
-          await _localClient.deleteIcon(laptopLocalIp!, packageName);
+          await _localClient.deleteIcon(peerIp, packageName);
         }
         _sentIconPackages.remove(packageName);
       }
@@ -1157,7 +1210,7 @@ class ConnectorController extends ChangeNotifier {
           final iconPath = await platform.exportAppIcon(packageName);
           if (iconPath == null || !File(iconPath).existsSync()) continue;
           final success = await _localClient.sendIcon(
-            laptopLocalIp!,
+            peerIp,
             packageName,
             File(iconPath),
           );
@@ -1481,17 +1534,35 @@ class ConnectorController extends ChangeNotifier {
 
   void _startPhoneFileServer() {
     _stopPhoneFileServer();
+    _bindPhoneFileServer(attempt: 0);
+  }
+
+  void _bindPhoneFileServer({required int attempt}) {
+    if (_disposed || role != DeviceRole.phone) return;
     ServerSocket.bind(InternetAddress.anyIPv4, LocalNetworkClient.kPhonePort)
         .then((server) {
+          _phoneFileServerRetry?.cancel();
           _phoneFileServer = server;
           server.listen((socket) {
             _handlePhoneFileClient(socket);
           });
         })
-        .catchError((_) {});
+        .catchError((_) {
+          if (attempt < 10) {
+            _phoneFileServerRetry = Timer(
+              const Duration(seconds: 5),
+              () => _bindPhoneFileServer(attempt: attempt + 1),
+            );
+          } else {
+            statusMessage = 'Local WiFi receive server failed to start';
+            _safeNotify();
+          }
+        });
   }
 
   void _stopPhoneFileServer() {
+    _phoneFileServerRetry?.cancel();
+    _phoneFileServerRetry = null;
     _phoneFileServer?.close();
     _phoneFileServer = null;
   }
@@ -1655,7 +1726,8 @@ class ConnectorController extends ChangeNotifier {
     final sizeInMb = (await file.length()) / (1024 * 1024);
     final fileName = file.path.split(Platform.pathSeparator).last;
 
-    if (isWifiReachable && phoneLocalIp != null) {
+    final peerIp = _effectivePeerIp;
+    if (isWifiReachable && peerIp != null) {
       final totalBytes = await file.length();
       uploadProgress = 0;
       uploadCurrent = 0;
@@ -1668,7 +1740,7 @@ class ConnectorController extends ChangeNotifier {
       );
       for (int attempt = 0; attempt < 2; attempt++) {
         final success = await _localClient.sendFileToPhone(
-          phoneLocalIp!,
+          peerIp,
           file,
           onProgress: (sentBytes, totalBytes) {
             uploadCurrent = sentBytes;
