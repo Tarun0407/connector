@@ -5,6 +5,7 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.app.RemoteInput
 import android.app.KeyguardManager
 import android.app.admin.DevicePolicyManager
 import android.hardware.biometrics.BiometricPrompt
@@ -34,6 +35,7 @@ import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
 import java.io.FileOutputStream
+import java.util.concurrent.ConcurrentHashMap
 
 class MainActivity : FlutterActivity() {
     private var mediaPlayer: MediaPlayer? = null
@@ -108,6 +110,16 @@ class MainActivity : FlutterActivity() {
                     val progress = call.argument<Double>("progress") ?: 0.0
                     result.success(showTransferNotification(title, fileName, progress))
                 }
+                "showSystemNotification" -> {
+                    val title = call.argument<String>("title") ?: "Connector"
+                    val body = call.argument<String>("body") ?: ""
+                    result.success(showSystemNotification(title, body))
+                }
+                "sendNotificationReply" -> {
+                    val replyCommandId = call.argument<String>("replyCommandId") ?: ""
+                    val text = call.argument<String>("text") ?: ""
+                    result.success(sendNotificationReply(replyCommandId, text))
+                }
                 "cancelTransferNotification" -> {
                     result.success(cancelTransferNotification())
                 }
@@ -146,6 +158,7 @@ class MainActivity : FlutterActivity() {
                 else -> result.notImplemented()
             }
         }
+        flushPendingPhoneNotifications()
         handleShareIntent(intent)
     }
 
@@ -424,6 +437,33 @@ class MainActivity : FlutterActivity() {
         return true
     }
 
+    private fun showSystemNotification(title: String, body: String): Boolean {
+        if (!canPostNotifications()) return false
+        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                SYSTEM_CHANNEL_ID,
+                "System messages",
+                NotificationManager.IMPORTANCE_DEFAULT
+            )
+            manager.createNotificationChannel(channel)
+        }
+        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Notification.Builder(this, SYSTEM_CHANNEL_ID)
+        } else {
+            @Suppress("DEPRECATION")
+            Notification.Builder(this)
+        }
+        val notification = builder
+            .setContentTitle(title)
+            .setContentText(body)
+            .setSmallIcon(applicationInfo.icon)
+            .setAutoCancel(true)
+            .build()
+        manager.notify(SYSTEM_NOTIFICATION_ID, notification)
+        return true
+    }
+
     private var disconnectedCancelHandler: java.lang.Runnable? = null
 
     private fun showDisconnectedNotification() {
@@ -516,6 +556,24 @@ class MainActivity : FlutterActivity() {
     private fun getAppIconPath(packageName: String): String {
         val iconFile = File(cacheDir, "appIcons/$packageName.png")
         return if (iconFile.exists()) iconFile.absolutePath else ""
+    }
+
+    private fun sendNotificationReply(replyCommandId: String, text: String): Boolean {
+        val action = replyActions[replyCommandId] ?: return false
+        val remoteInputs = action.remoteInputs ?: return false
+        if (text.isBlank()) return false
+        return try {
+            val intent = Intent()
+            val results = android.os.Bundle()
+            for (input in remoteInputs) {
+                results.putCharSequence(input.resultKey, text)
+            }
+            RemoteInput.addResultsToIntent(remoteInputs, intent, results)
+            action.actionIntent.send(this, 0, intent)
+            true
+        } catch (_: Exception) {
+            false
+        }
     }
 
     private fun buildLaptopMediaNotification(state: LaptopMediaState): Notification {
@@ -796,17 +854,53 @@ class MainActivity : FlutterActivity() {
         private const val FILE_TRANSFER_NOTIFICATION_ID = 1212
         private const val DISCONNECTED_CHANNEL_ID = "connector_disconnected"
         private const val DISCONNECTED_NOTIFICATION_ID = 1213
+        private const val SYSTEM_CHANNEL_ID = "connector_system"
+        private const val SYSTEM_NOTIFICATION_ID = 1214
         private const val BIOMETRIC_STRONG = 0x000F
         private const val DEVICE_CREDENTIAL = 0x8000
         private const val MEDIA_SMOOTHING_WINDOW_MS = 5000L
         private var methodChannel: MethodChannel? = null
+        private val replyActions = ConcurrentHashMap<String, Notification.Action>()
+        private val pendingPhoneNotifications = mutableListOf<Map<String, Any>>()
 
         fun sendPhoneNotification(data: Map<String, Any>) {
-            methodChannel?.invokeMethod("phoneNotification", data)
+            val channel = methodChannel
+            if (channel == null) {
+                synchronized(pendingPhoneNotifications) {
+                    pendingPhoneNotifications.add(data)
+                    if (pendingPhoneNotifications.size > 50) {
+                        pendingPhoneNotifications.removeAt(0)
+                    }
+                }
+            } else {
+                channel.invokeMethod("phoneNotification", data)
+            }
+        }
+
+        fun flushPendingPhoneNotifications() {
+            val channel = methodChannel ?: return
+            val pending = synchronized(pendingPhoneNotifications) {
+                val copy = pendingPhoneNotifications.toList()
+                pendingPhoneNotifications.clear()
+                copy
+            }
+            for (notification in pending) {
+                channel.invokeMethod("phoneNotification", notification)
+            }
         }
 
         fun sendLaptopMediaAction(action: Map<String, Any>) {
             methodChannel?.invokeMethod("laptopMediaAction", action)
+        }
+
+        fun registerReplyAction(action: Notification.Action): String {
+            val id = "reply_${System.currentTimeMillis()}_${action.hashCode()}"
+            replyActions[id] = action
+            if (replyActions.size > 100) {
+                val firstKey = replyActions.keys.firstOrNull()
+                if (firstKey != null) replyActions.remove(firstKey)
+            }
+            return id
         }
     }
 

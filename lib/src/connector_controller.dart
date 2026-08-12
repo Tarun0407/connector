@@ -73,6 +73,7 @@ class ConnectorController extends ChangeNotifier {
   StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _commandsSub;
   StreamSubscription<Map<String, Object?>>? _phoneNotificationsSub;
   StreamSubscription<Map<String, Object?>>? _laptopMediaActionsSub;
+  StreamSubscription<Map<String, Object?>>? _notificationRepliesSub;
   ServerSocket? _phoneFileServer;
   Timer? _phoneFileServerRetry;
   Timer? _heartbeatTimer;
@@ -84,6 +85,7 @@ class ConnectorController extends ChangeNotifier {
 
   Set<String> _sentIconPackages = <String>{};
   bool _syncingIcons = false;
+  final Map<String, String> _appLabels = <String, String>{};
 
   StreamSubscription<List<String>>? _incomingSharesSub;
   String? _lastLocalClipboard;
@@ -140,7 +142,8 @@ class ConnectorController extends ChangeNotifier {
     phoneReceivedFiles =
         _preferences!.getStringList('connector.phoneReceivedFiles') ?? [];
     _sentIconPackages =
-        (_preferences!.getStringList('connector.sentIconPackages') ?? <String>[])
+        (_preferences!.getStringList('connector.sentIconPackages') ??
+                <String>[])
             .toSet();
 
     try {
@@ -217,9 +220,13 @@ class ConnectorController extends ChangeNotifier {
     _listenForEvents();
     _listenForCommands();
     _listenForLaptopMediaNotificationActions();
+    _listenForNotificationReplies();
     _startHeartbeat();
     _startPresenceChecks();
     _startIconSync();
+    if (role == DeviceRole.phone) {
+      unawaited(_warmAppLabels());
+    }
 
     if (role == DeviceRole.laptop) {
       _startDesktopPolling();
@@ -611,18 +618,20 @@ class ConnectorController extends ChangeNotifier {
       return;
     }
 
-    final existing = await _roomRef
-        .collection('commands')
-        .where('target', isEqualTo: target.key)
-        .where('type', isEqualTo: type)
-        .where('status', isEqualTo: 'queued')
-        .limit(1)
-        .get();
+    if (type != 'phone.notification.reply') {
+      final existing = await _roomRef
+          .collection('commands')
+          .where('target', isEqualTo: target.key)
+          .where('type', isEqualTo: type)
+          .where('status', isEqualTo: 'queued')
+          .limit(1)
+          .get();
 
-    if (existing.docs.isNotEmpty) {
-      statusMessage = 'Command already queued';
-      _safeNotify();
-      return;
+      if (existing.docs.isNotEmpty) {
+        statusMessage = 'Command already queued';
+        _safeNotify();
+        return;
+      }
     }
 
     await _roomRef.collection('commands').add({
@@ -733,8 +742,19 @@ class ConnectorController extends ChangeNotifier {
         await platform.requestDeviceAdmin();
         await refreshPhoneState();
         return;
+      case 'phone.notification.reply':
+        final replyCommandId = (payload['replyCommandId'] ?? '').toString();
+        final text = (payload['text'] ?? '').toString();
+        if (replyCommandId.isNotEmpty && text.trim().isNotEmpty) {
+          await platform.sendNotificationReply(
+            replyCommandId: replyCommandId,
+            text: text,
+          );
+        }
+        return;
       case 'laptop.localFileReceived':
-        final fileName = payload['fileName'] as String?;        if (fileName != null) {
+        final fileName = payload['fileName'] as String?;
+        if (fileName != null) {
           final file = File(_downloadsDir + Platform.pathSeparator + fileName);
           if (await file.exists()) {
             receivedFiles = [file.path, ...receivedFiles.take(19)];
@@ -856,7 +876,14 @@ class ConnectorController extends ChangeNotifier {
           role == DeviceRole.laptop) {
         final body = _notificationBody(event);
         unawaited(
-          platform.showSystemNotification(title: event.title, body: body),
+          platform.showSystemNotification(
+            title: event.title,
+            body: body,
+            package: event.package,
+            appName: event.label,
+            canReply: event.canReply,
+            replyCommandId: event.replyCommandId,
+          ),
         );
       } else if (event.type == 'file.received' &&
           event.source == DeviceRole.laptop &&
@@ -889,6 +916,9 @@ class ConnectorController extends ChangeNotifier {
       final packageName = (data['package'] ?? 'Android').toString();
       final title = (data['title'] ?? packageName).toString();
       final text = (data['text'] ?? '').toString();
+      final label = (data['label'] ?? _appLabels[packageName] ?? packageName)
+          .toString();
+      final replyCommandId = (data['replyCommandId'] ?? '').toString();
       final postedAtValue = data['postedAt'];
       final originalTime = postedAtValue is num
           ? DateTime.fromMillisecondsSinceEpoch(postedAtValue.toInt())
@@ -900,6 +930,9 @@ class ConnectorController extends ChangeNotifier {
           detail: text.trim().isEmpty ? packageName : text,
           originalTime: originalTime,
           package: packageName,
+          label: label,
+          canReply: data['canReply'] == true && replyCommandId.isNotEmpty,
+          replyCommandId: replyCommandId.isEmpty ? null : replyCommandId,
         ),
       );
     });
@@ -920,6 +953,23 @@ class ConnectorController extends ChangeNotifier {
           ? <String, Object?>{'positionMs': data['positionMs'] ?? 0}
           : const <String, Object?>{};
       unawaited(sendLaptopCommand(command, payload: payload));
+    });
+  }
+
+  void _listenForNotificationReplies() {
+    if (role != DeviceRole.laptop) return;
+    _notificationRepliesSub?.cancel();
+    _notificationRepliesSub = platform.notificationReplies.listen((data) {
+      final replyCommandId = (data['replyCommandId'] ?? '').toString();
+      final text = (data['text'] ?? '').toString();
+      if (replyCommandId.isEmpty || text.trim().isEmpty) return;
+      unawaited(
+        sendCommand(
+          DeviceRole.phone,
+          'phone.notification.reply',
+          payload: {'replyCommandId': replyCommandId, 'text': text.trim()},
+        ),
+      );
     });
   }
 
@@ -1050,34 +1100,32 @@ class ConnectorController extends ChangeNotifier {
     required String detail,
     DateTime? originalTime,
     String? package,
+    String? label,
+    bool canReply = false,
+    String? replyCommandId,
   }) async {
     if (!firebaseReady || !hasRoom) return;
+    final eventData = <String, Object?>{
+      'type': type,
+      'title': title,
+      'detail': detail,
+      'source': role.key,
+      'sourceDeviceId': deviceId,
+      'createdAt': FieldValue.serverTimestamp(),
+      if (package != null && package.isNotEmpty) 'package': package,
+      if (label != null && label.isNotEmpty) 'label': label,
+      if (canReply) 'canReply': true,
+      if (replyCommandId != null && replyCommandId.isNotEmpty)
+        'replyCommandId': replyCommandId,
+      if (originalTime != null)
+        'originalTime': Timestamp.fromDate(originalTime),
+    };
     try {
-      await _roomRef.collection('events').add({
-        'type': type,
-        'title': title,
-        'detail': detail,
-        'source': role.key,
-        'sourceDeviceId': deviceId,
-        'createdAt': FieldValue.serverTimestamp(),
-        'package': ?package,
-        if (originalTime != null)
-          'originalTime': Timestamp.fromDate(originalTime),
-      });
+      await _roomRef.collection('events').add(eventData);
     } catch (_) {
       await Future<void>.delayed(const Duration(seconds: 2));
       try {
-        await _roomRef.collection('events').add({
-          'type': type,
-          'title': title,
-          'detail': detail,
-          'source': role.key,
-          'sourceDeviceId': deviceId,
-          'createdAt': FieldValue.serverTimestamp(),
-          'package': ?package,
-          if (originalTime != null)
-            'originalTime': Timestamp.fromDate(originalTime),
-        });
+        await _roomRef.collection('events').add(eventData);
       } catch (_) {}
     }
   }
@@ -1171,6 +1219,22 @@ class ConnectorController extends ChangeNotifier {
     });
   }
 
+  void _refreshAppLabels(List<Map<String, String>> apps) {
+    for (final app in apps) {
+      final package = app['package'] ?? '';
+      final label = app['label'] ?? '';
+      if (package.isEmpty || label.isEmpty) continue;
+      _appLabels[package] = label;
+    }
+  }
+
+  Future<void> _warmAppLabels() async {
+    try {
+      final apps = await platform.listInstalledApps();
+      _refreshAppLabels(apps);
+    } catch (_) {}
+  }
+
   Future<void> _syncAppIcons() async {
     if (_disposed ||
         role != DeviceRole.phone ||
@@ -1185,6 +1249,7 @@ class ConnectorController extends ChangeNotifier {
     _syncingIcons = true;
     try {
       final apps = await platform.listInstalledApps();
+      _refreshAppLabels(apps);
       final installed = apps
           .map((app) => app['package'])
           .whereType<String>()
@@ -1233,10 +1298,7 @@ class ConnectorController extends ChangeNotifier {
           await sendCommand(
             DeviceRole.laptop,
             'laptop.syncAppIcon',
-            payload: {
-              'added': cloudIcons,
-              'removed': removed,
-            },
+            payload: {'added': cloudIcons, 'removed': removed},
           );
         }
       }
@@ -1254,9 +1316,9 @@ class ConnectorController extends ChangeNotifier {
   Future<String?> _uploadAppIcon(String packageName, File iconFile) async {
     try {
       if (roomCode == null) return null;
-      final ref = FirebaseStorage.instance
-          .ref()
-          .child('appIcons/$roomCode/$packageName.png');
+      final ref = FirebaseStorage.instance.ref().child(
+        'appIcons/$roomCode/$packageName.png',
+      );
       await ref.putFile(iconFile);
       return ref.getDownloadURL();
     } catch (_) {
@@ -1336,11 +1398,13 @@ class ConnectorController extends ChangeNotifier {
     await _commandsSub?.cancel();
     await _phoneNotificationsSub?.cancel();
     await _laptopMediaActionsSub?.cancel();
+    await _notificationRepliesSub?.cancel();
     _devicesSub = null;
     _eventsSub = null;
     _commandsSub = null;
     _phoneNotificationsSub = null;
     _laptopMediaActionsSub = null;
+    _notificationRepliesSub = null;
     _presenceCheckTimer = null;
   }
 
@@ -1399,6 +1463,7 @@ class ConnectorController extends ChangeNotifier {
       'phone.stopRing' => 'stop ringing',
       'phone.lock' => 'lock phone',
       'phone.requestAdmin' => 'enable phone lock',
+      'phone.notification.reply' => 'send notification reply',
       _ => type,
     };
   }

@@ -12,6 +12,8 @@ class ConnectorPlatformBridge {
       StreamController<Map<String, Object?>>.broadcast();
   final StreamController<List<String>> _incomingShares =
       StreamController<List<String>>.broadcast();
+  final StreamController<Map<String, Object?>> _notificationReplies =
+      StreamController<Map<String, Object?>>.broadcast();
 
   ConnectorPlatformBridge() {
     _channel.setMethodCallHandler((call) async {
@@ -42,6 +44,12 @@ class ConnectorPlatformBridge {
           }
         }
       }
+      if (call.method == 'notificationReply') {
+        final arguments = call.arguments;
+        if (arguments is Map) {
+          _notificationReplies.add(arguments.cast<String, Object?>());
+        }
+      }
     });
   }
 
@@ -52,6 +60,9 @@ class ConnectorPlatformBridge {
       _laptopMediaActions.stream;
 
   Stream<List<String>> get incomingShares => _incomingShares.stream;
+
+  Stream<Map<String, Object?>> get notificationReplies =>
+      _notificationReplies.stream;
 
   Future<bool> mediaPlayPause() => _invokeBool('mediaPlayPause');
 
@@ -147,10 +158,19 @@ class ConnectorPlatformBridge {
   Future<bool> showSystemNotification({
     required String title,
     required String body,
+    String? package,
+    String? appName,
+    bool canReply = false,
+    String? replyCommandId,
   }) {
     return _invokeBool('showSystemNotification', {
       'title': title,
       'body': body,
+      if (package != null && package.isNotEmpty) 'package': package,
+      if (appName != null && appName.isNotEmpty) 'appName': appName,
+      'canReply': canReply,
+      if (replyCommandId != null && replyCommandId.isNotEmpty)
+        'replyCommandId': replyCommandId,
     });
   }
 
@@ -183,6 +203,16 @@ class ConnectorPlatformBridge {
 
   Future<bool> showDisconnectedNotification() {
     return _invokeBool('showDisconnectedNotification');
+  }
+
+  Future<bool> sendNotificationReply({
+    required String replyCommandId,
+    required String text,
+  }) {
+    return _invokeBool('sendNotificationReply', {
+      'replyCommandId': replyCommandId,
+      'text': text,
+    });
   }
 
   Future<bool> clearDisconnectedNotification() {

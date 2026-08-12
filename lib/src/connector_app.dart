@@ -1635,7 +1635,7 @@ class _ActivityList extends StatelessWidget {
                 controller: controller,
               ),
               title: Text(
-                event.title,
+                _eventTitle(event),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
               ),
@@ -1651,6 +1651,16 @@ class _ActivityList extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  String _eventTitle(ActivityEvent event) {
+    if (event.type == 'phone.notification' &&
+        event.label != null &&
+        event.label!.isNotEmpty &&
+        event.label != event.title) {
+      return '${event.label}  ·  ${event.title}';
+    }
+    return event.title;
   }
 
   String _eventSubtitle(ActivityEvent event) {

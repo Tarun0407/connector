@@ -218,9 +218,8 @@ class RemoteDevice {
           : null,
       remoteUnlockReady: data['remoteUnlockReady'] == true,
       localIp: (data['localIp'] ?? '').toString(),
-      localIps: (data['localIps'] as List<dynamic>?)
-              ?.whereType<String>()
-              .toList() ??
+      localIps:
+          (data['localIps'] as List<dynamic>?)?.whereType<String>().toList() ??
           const <String>[],
       connectivityMode: ConnectivityMode.values.firstWhere(
         (m) => m.key == data['connectivityMode'],
@@ -266,6 +265,9 @@ class ActivityEvent {
     required this.createdAt,
     this.originalTime,
     this.package,
+    this.label,
+    this.canReply = false,
+    this.replyCommandId,
   });
 
   factory ActivityEvent.fromDoc(String id, Map<String, Object?> data) {
@@ -278,6 +280,9 @@ class ActivityEvent {
       createdAt: readFirestoreDate(data['createdAt']) ?? DateTime.now(),
       originalTime: readFirestoreDate(data['originalTime']),
       package: (data['package'] as String?),
+      label: (data['label'] as String?),
+      canReply: data['canReply'] == true,
+      replyCommandId: data['replyCommandId'] as String?,
     );
   }
 
@@ -289,4 +294,7 @@ class ActivityEvent {
   final DateTime createdAt;
   final DateTime? originalTime;
   final String? package;
+  final String? label;
+  final bool canReply;
+  final String? replyCommandId;
 }

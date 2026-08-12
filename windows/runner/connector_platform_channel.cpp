@@ -16,6 +16,7 @@
 #include <thread>
 #include <mutex>
 #include <cstdio>
+#include <cstring>
 #include <variant>
 #include <algorithm>
 #include <chrono>
@@ -59,11 +60,13 @@ constexpr wchar_t kAumid[] = L"Connector.Connector";
 constexpr int kLocalPort = 5005;
 constexpr UINT kTrayIconId = 1208;
 constexpr UINT WM_APP_TRAY = WM_APP + 1;
+constexpr wchar_t kReplyInputId[] = L"connectorReplyText";
 
 } // namespace
 
 HWND g_main_hwnd = nullptr;
 bool g_trayIconCreated = false;
+static std::unique_ptr<MethodChannel<EncodableValue>> g_channel;
 
 void RegisterSendTo();
 void RegisterContextMenu();
@@ -395,22 +398,26 @@ bool EnsureToastRegistration() {
     shellLink->SetDescription(L"Connector");
     shellLink->SetIconLocation(exePath, 0);
 
-    IPersistFile* persistFile = nullptr;
+    // Set the AppUserModelID BEFORE saving the shortcut so it is persisted to
+    // the .lnk file (setting it after Save may not flush to disk).
     bool ok = false;
+    IPropertyStore* propertyStore = nullptr;
+    if (SUCCEEDED(shellLink->QueryInterface(IID_PPV_ARGS(&propertyStore)))) {
+        PROPVARIANT prop;
+        PropVariantInit(&prop);
+        if (SUCCEEDED(InitPropVariantFromString(kAumid, &prop))) {
+            if (SUCCEEDED(propertyStore->SetValue(PKEY_AppUserModel_ID, prop))) {
+                ok = SUCCEEDED(propertyStore->Commit());
+            }
+            PropVariantClear(&prop);
+        }
+        propertyStore->Release();
+    }
+
+    IPersistFile* persistFile = nullptr;
     if (SUCCEEDED(shellLink->QueryInterface(IID_PPV_ARGS(&persistFile)))) {
         if (SUCCEEDED(persistFile->Save(shortcutPath.c_str(), TRUE))) {
-            IPropertyStore* propertyStore = nullptr;
-            if (SUCCEEDED(shellLink->QueryInterface(IID_PPV_ARGS(&propertyStore)))) {
-                PROPVARIANT prop;
-                PropVariantInit(&prop);
-                if (SUCCEEDED(InitPropVariantFromString(kAumid, &prop))) {
-                    if (SUCCEEDED(propertyStore->SetValue(PKEY_AppUserModel_ID, prop))) {
-                        ok = SUCCEEDED(propertyStore->Commit());
-                    }
-                    PropVariantClear(&prop);
-                }
-                propertyStore->Release();
-            }
+            ok = true;
         }
         persistFile->Release();
     }
@@ -418,17 +425,97 @@ bool EnsureToastRegistration() {
     return ok;
 }
 
+std::wstring EscapeXmlText(const std::wstring& value) {
+    std::wstring escaped;
+    escaped.reserve(value.size());
+    for (wchar_t c : value) {
+        switch (c) {
+            case L'&': escaped += L"&amp;"; break;
+            case L'<': escaped += L"&lt;"; break;
+            case L'>': escaped += L"&gt;"; break;
+            case L'"': escaped += L"&quot;"; break;
+            case L'\'': escaped += L"&apos;"; break;
+            default: escaped += c; break;
+        }
+    }
+    return escaped;
+}
+
+// Checks the PNG magic bytes so corrupt/truncated icon files never break the
+// toast (an invalid toast image makes Windows drop the whole notification).
+bool IsPngFile(const std::wstring& path) {
+    const unsigned char pngMagic[8] = {0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A};
+    FILE* file = nullptr;
+    _wfopen_s(&file, path.c_str(), L"rb");
+    if (!file) return false;
+    unsigned char header[8] = {};
+    const size_t read = fread(header, 1, 8, file);
+    fclose(file);
+    return read == 8 && memcmp(header, pngMagic, 8) == 0;
+}
+
 // Shows a persistent toast notification (stored in the Windows Action Center).
-bool ShowToastNotification(const std::string& title, const std::string& body) {
+// When [package] is provided and its icon exists locally, the toast shows the
+// source app's icon (appLogoOverride); [appName] replaces the toast app name.
+bool ShowToastNotification(const std::string& title, const std::string& body,
+                           const std::string& package, const std::string& appName,
+                           bool canReply = false,
+                           const std::string& replyCommandId = "") {
     try {
         EnsureToastRegistration();
-        auto xmlDoc = notifications::ToastNotificationManager::GetTemplateContent(
-            notifications::ToastTemplateType::ToastText02);
-        auto texts = xmlDoc.GetElementsByTagName(L"text");
-        if (texts.Size() < 2) return false;
-        texts.Item(0).InnerText(winrt::hstring(Utf8ToWide(title)));
-        texts.Item(1).InnerText(winrt::hstring(Utf8ToWide(body)));
-        notifications::ToastNotification toast(xmlDoc);
+        std::wstring sourceName = appName.empty() ? Utf8ToWide(title) : Utf8ToWide(appName);
+        std::wstring imageXml;
+        if (!package.empty()) {
+            std::wstring iconPath = GetAppIconsPath() + L"\\" + Utf8ToWide(package) + L".png";
+            if (IsPngFile(iconPath)) {
+                std::wstring uri = L"file:///" + iconPath;
+                std::replace(uri.begin(), uri.end(), L'\\', L'/');
+                imageXml = L"<image placement=\"appLogoOverride\" src=\"" + uri + L"\"/>";
+            }
+        }
+        std::wstring actionsXml;
+        if (canReply && !replyCommandId.empty()) {
+            actionsXml = std::wstring(L"<actions>") +
+                L"<input id=\"" + std::wstring(kReplyInputId) + L"\" type=\"text\" placeHolderContent=\"Reply\"/>" +
+                L"<action content=\"Send\" arguments=\"reply:" + EscapeXmlText(Utf8ToWide(replyCommandId)) + L"\" activationType=\"foreground\"/>" +
+                L"</actions>";
+        }
+        std::wstring xml = std::wstring(L"<toast><visual><binding template=\"ToastGeneric\">") +
+            L"<text placement=\"appName\">Connector</text>" +
+            imageXml +
+            L"<text>" + EscapeXmlText(sourceName) + L"</text>" +
+            L"<text>" + EscapeXmlText(Utf8ToWide(body)) + L"</text>" +
+            L"</binding></visual>" +
+            actionsXml +
+            L"</toast>";
+        xml_dom::XmlDocument doc;
+        doc.LoadXml(xml);
+        notifications::ToastNotification toast(doc);
+        if (canReply && !replyCommandId.empty() && g_channel) {
+            toast.Activated([](notifications::ToastNotification const&, winrt::Windows::Foundation::IInspectable const& argsInspectable) {
+                try {
+                    auto args = argsInspectable.as<notifications::ToastActivatedEventArgs>();
+                    std::wstring arguments = args.Arguments().c_str();
+                    const std::wstring prefix = L"reply:";
+                    if (arguments.rfind(prefix, 0) != 0) return;
+                    std::string replyCommandId = WideToUtf8(arguments.substr(prefix.size()));
+                    std::string replyText;
+                    auto userInput = args.UserInput();
+                    if (userInput.HasKey(kReplyInputId)) {
+                        auto value = userInput.Lookup(kReplyInputId);
+                        replyText = HStringToUtf8(winrt::unbox_value<winrt::hstring>(value));
+                    }
+                    if (replyCommandId.empty() || replyText.empty() || !g_channel) return;
+                    EncodableMap payload;
+                    payload[EncodableValue("replyCommandId")] = EncodableValue(replyCommandId);
+                    payload[EncodableValue("text")] = EncodableValue(replyText);
+                    g_channel->InvokeMethod(
+                        "notificationReply",
+                        std::make_unique<EncodableValue>(payload)
+                    );
+                } catch (...) {}
+            });
+        }
         auto notifier = notifications::ToastNotificationManager::CreateToastNotifier(kAumid);
         notifier.Show(toast);
         return true;
@@ -437,8 +524,12 @@ bool ShowToastNotification(const std::string& title, const std::string& body) {
     }
 }
 
-bool ShowSystemNotification(const std::string& title, const std::string& body) {
-    if (ShowToastNotification(title, body)) {
+bool ShowSystemNotification(const std::string& title, const std::string& body,
+                            const std::string& package = "",
+                            const std::string& appName = "",
+                            bool canReply = false,
+                            const std::string& replyCommandId = "") {
+    if (ShowToastNotification(title, body, package, appName, canReply, replyCommandId)) {
         return true;
     }
     CreateSystemTrayIcon();
@@ -651,7 +742,13 @@ void HandleMethodCall(
     if (method == "showSystemNotification") {
         std::string title = ReadStringArgument(call.arguments(), "title", "Connector");
         std::string body = ReadStringArgument(call.arguments(), "body", "");
-        result->Success(EncodableValue(ShowSystemNotification(title, body)));
+        std::string package = ReadStringArgument(call.arguments(), "package", "");
+        std::string appName = ReadStringArgument(call.arguments(), "appName", "");
+        bool canReply = ReadBoolArgument(call.arguments(), "canReply", false);
+        std::string replyCommandId = ReadStringArgument(call.arguments(), "replyCommandId", "");
+        result->Success(EncodableValue(
+            ShowSystemNotification(title, body, package, appName, canReply, replyCommandId)
+        ));
         return;
     }
     if (method == "showTransferNotification") {
@@ -798,8 +895,6 @@ void SetMainWindowHandle(HWND hwnd) {
     g_main_hwnd = hwnd;
     CreateSystemTrayIcon();
 }
-
-static std::unique_ptr<MethodChannel<EncodableValue>> g_channel;
 
 void CheckIncomingFiles() {
     if (!g_channel) return;

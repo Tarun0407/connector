@@ -2,6 +2,9 @@ package com.example.connector
 
 import android.content.ComponentName
 import android.os.Build
+import android.app.Notification
+import android.app.RemoteInput
+import android.content.Intent
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 
@@ -19,6 +22,11 @@ class ConnectorNotificationListener : NotificationListenerService() {
                 "system" to true
             )
         )
+        try {
+            activeNotifications?.forEach { notification ->
+                onNotificationPosted(notification)
+            }
+        } catch (_: Exception) {}
     }
 
     override fun onListenerDisconnected() {
@@ -39,6 +47,20 @@ class ConnectorNotificationListener : NotificationListenerService() {
         val bigText = extras.getCharSequence("android.bigText")?.toString()
         val summary = extras.getCharSequence("android.summaryText")?.toString()
         val body = bigText ?: text.ifBlank { summary.orEmpty() }
+        val replyAction = sbn.notification.actions?.firstOrNull { action ->
+            action.remoteInputs?.any { it.allowFreeFormInput } == true
+        }
+        val replyCommandId = if (replyAction != null) {
+            MainActivity.registerReplyAction(replyAction)
+        } else {
+            ""
+        }
+        val label = try {
+            val appInfo = packageManager.getApplicationInfo(sbn.packageName, 0)
+            packageManager.getApplicationLabel(appInfo).toString()
+        } catch (_: Exception) {
+            sbn.packageName
+        }
 
         // Create a unique key for this notification content
         val notificationKey = "${sbn.packageName}_${title}_${body}"
@@ -53,9 +75,12 @@ class ConnectorNotificationListener : NotificationListenerService() {
         MainActivity.sendPhoneNotification(
             mapOf(
                 "package" to sbn.packageName,
+                "label" to label,
                 "title" to title,
                 "text" to body,
-                "postedAt" to sbn.postTime
+                "postedAt" to sbn.postTime,
+                "canReply" to (replyAction != null),
+                "replyCommandId" to replyCommandId
             )
         )
     }
